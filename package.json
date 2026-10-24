@@ -1,0 +1,36 @@
+{
+  "name": "agentpay-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentPay — Verifiable payment-authorization and audit platform for AI agents",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm --recursive run build",
+    "typecheck": "pnpm --recursive run typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --check \"**/*.{ts,tsx,js,mjs,json,md,yaml,yml}\"",
+    "format:fix": "prettier --write \"**/*.{ts,tsx,js,mjs,json,md,yaml,yml}\"",
+    "test": "vitest run",
+    "test:unit": "vitest run --dir packages services",
+    "test:integration": "vitest run --dir tests/integration",
+    "test:e2e": "playwright test",
+    "db:migrate": "tsx db/migrate.ts",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs --tail=100 -f"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.18.0",
+    "@playwright/test": "1.49.1",
+    "@types/node": "22.10.7",
+    "eslint": "9.18.0",
+    "prettier": "3.4.2",
+    "tsx": "4.19.2",
+    "typescript": "5.7.3",
+    "typescript-eslint": "8.20.0",
+    "vitest": "2.1.8"
+  }
+}

@@ -1,0 +1,174 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: agentpay-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentpay_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-agentpay}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/migrations/001_create_audit_events.sql:/docker-entrypoint-initdb.d/001_create_audit_events.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-agentpay} -d ${POSTGRES_DB:-agentpay}']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  audit-service:
+    build:
+      context: .
+      dockerfile: services/audit-service/Dockerfile
+    container_name: agentpay-audit-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 4004
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agentpay}:${POSTGRES_PASSWORD:-agentpay_dev_pw}@postgres:5432/${POSTGRES_DB:-agentpay}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4004/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  policy-service:
+    build:
+      context: .
+      dockerfile: services/policy-service/Dockerfile
+    container_name: agentpay-policy-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 4002
+      HOST: 0.0.0.0
+      MAX_TRANSACTION_LIMIT_MINOR: 200000
+      APPROVAL_THRESHOLD_MINOR: 50000
+      DEFAULT_ALLOWED_CURRENCY: USD
+      RESTRICTED_CATEGORIES: gambling,cryptocurrency,weapons,adult_entertainment
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4002/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  agent-service:
+    build:
+      context: .
+      dockerfile: services/agent-service/Dockerfile
+    container_name: agentpay-agent-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 4001
+      HOST: 0.0.0.0
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4001/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: agentpay-payment-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 4003
+      HOST: 0.0.0.0
+      PAYMENT_PROVIDER: mock
+      PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
+      POLICY_SERVICE_URL: http://policy-service:4002
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4003/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: agentpay-api-gateway
+    restart: unless-stopped
+    ports:
+      - '${API_GATEWAY_PORT:-4000}:4000'
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 4000
+      HOST: 0.0.0.0
+      AGENT_SERVICE_URL: http://agent-service:4001
+      POLICY_SERVICE_URL: http://policy-service:4002
+      PAYMENT_SERVICE_URL: http://payment-service:4003
+      AUDIT_SERVICE_URL: http://audit-service:4004
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+    depends_on:
+      agent-service:
+        condition: service_healthy
+      policy-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      audit-service:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4000/api/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: agentpay-web
+    restart: unless-stopped
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      API_GATEWAY_URL: http://api-gateway:4000
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:3000/']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agentpay-network
+
+volumes:
+  postgres-data:
+    name: agentpay-postgres-data
+
+networks:
+  agentpay-network:
+    name: agentpay-network
+    driver: bridge

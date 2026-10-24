@@ -1,0 +1,60 @@
+name: AgentPay CD (Gated Release Pipeline)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment target'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+
+# Explicit minimal permissions
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  validate-and-gate:
+    name: Validate Gating Prerequisites
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'staging' }}
+    steps:
+      - name: Verify Protected Branch
+        run: |
+          echo "Verifying deployment context..."
+          if [ "${{ github.ref }}" != "refs/heads/main" ] && [[ "${{ github.ref }}" != refs/tags/v* ]]; then
+            echo "::error::Deployments are strictly restricted to the protected 'main' branch or version tags."
+            exit 1
+          fi
+
+      - name: Document Hosting & Registry Prerequisites
+        run: |
+          echo "================================================================================"
+          echo "AGENTPAY CD PIPELINE SKELETON — DEPLOYMENT GATING CHECK"
+          echo "================================================================================"
+          echo "Production deployment is currently GATED pending:"
+          echo "  1. Container Registry configuration (GHCR / AWS ECR / GCP Artifact Registry)"
+          echo "  2. Target Kubernetes cluster / ECS / Cloud Run deployment credentials"
+          echo "  3. PayPal Sandbox OAuth credentials verification"
+          echo "  4. Production secret management setup (e.g. Vault or AWS Secrets Manager)"
+          echo "No fake deployment will be simulated."
+          echo "================================================================================"
+
+      - name: Check Registry Secrets
+        id: check_secrets
+        run: |
+          if [ -z "${{ secrets.CONTAINER_REGISTRY_URL }}" ]; then
+            echo "CONTAINER_REGISTRY_URL is not set. Deployment safely halted at verification gate."
+            echo "Configure the repository environment secrets to enable automatic image push and rollout."
+            exit 0
+          else
+            echo "Container registry configured: ${{ secrets.CONTAINER_REGISTRY_URL }}"
+          fi

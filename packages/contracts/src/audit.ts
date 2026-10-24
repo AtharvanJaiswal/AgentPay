@@ -1,0 +1,43 @@
+import { z } from 'zod';
+
+export const AuditEventTypeSchema = z.enum([
+  'PROPOSAL_CREATED',
+  'POLICY_EVALUATION_STARTED',
+  'POLICY_EVALUATED_ALLOW',
+  'POLICY_EVALUATED_DENY',
+  'POLICY_EVALUATED_APPROVAL_REQUIRED',
+  'ORDER_CREATION_ATTEMPTED',
+  'ORDER_CREATED',
+  'ORDER_CAPTURE_ATTEMPTED',
+  'ORDER_CAPTURED',
+  'PAYMENT_BLOCKED',
+  'SYSTEM_SECURITY_ALERT',
+]);
+export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
+
+export const AuditEventSchema = z.object({
+  id: z.string().uuid(),
+  correlationId: z.string().min(1),
+  eventType: AuditEventTypeSchema,
+  actor: z.string().min(1),
+  resourceId: z.string().min(1),
+  timestamp: z.string().datetime(),
+  metadata: z.record(z.unknown()),
+  outcome: z.string().optional(),
+  reasonCode: z.string().optional(),
+});
+export type AuditEvent = z.infer<typeof AuditEventSchema>;
+
+export const CreateAuditEventInputSchema = AuditEventSchema.omit({
+  id: true,
+  timestamp: true,
+}).extend({
+  id: z.string().uuid().optional(),
+  timestamp: z.string().datetime().optional(),
+});
+export type CreateAuditEventInput = z.infer<typeof CreateAuditEventInputSchema>;
+
+export interface AuditRepository {
+  recordEvent(event: CreateAuditEventInput): Promise<AuditEvent>;
+  listEvents(limit?: number, correlationId?: string): Promise<AuditEvent[]>;
+}
