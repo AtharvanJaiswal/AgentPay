@@ -96,3 +96,79 @@ To reset the development database safely without losing custom configuration:
 ```bash
 docker compose exec postgres psql -U agentpay -d agentpay -c "TRUNCATE audit_events;"
 ```
+
+---
+
+## PayPal Sandbox OAuth Configuration (Phase 1A)
+
+The payment microservice includes a lightweight, secure OAuth client for the official PayPal Sandbox (`https://api-m.sandbox.paypal.com/v1/oauth2/token`). By default, `PAYMENT_PROVIDER=mock` and `PAYMENTS_ENABLED=false`, keeping the platform completely decoupled from third-party networks during routine development.
+
+### 1. Obtaining Sandbox Credentials
+
+1. Log into the [PayPal Developer Portal](https://developer.paypal.com/dashboard/).
+2. Navigate to **Apps & Credentials** and select the **Sandbox** tab.
+3. Select or create a REST API App.
+4. Copy the **Client ID** and **Secret**.
+
+### 2. Secure Configuration
+
+Add your sandbox credentials strictly to your local, uncommitted `.env` file (copied from `.env.example`):
+
+```env
+# PayPal Sandbox Credentials (SERVER-SIDE ONLY - NEVER COMMIT TO GIT)
+PAYPAL_CLIENT_ID=your_sandbox_client_id_here
+PAYPAL_CLIENT_SECRET=your_sandbox_client_secret_here
+PAYPAL_ENVIRONMENT=sandbox
+PAYPAL_API_BASE_URL=https://api-m.sandbox.paypal.com
+```
+
+> [!CAUTION]
+>
+> - Never commit `.env` or paste real credentials into GitHub issues, PRs, or chat logs.
+> - Credentials and OAuth access tokens are never logged or stored in audit payloads.
+> - Basic Authentication headers and access tokens are strictly withheld from client-facing endpoints.
+
+### 3. Safe Diagnostic Verification
+
+AgentPay provides an explicit diagnostic command to test Sandbox authentication without triggering payment side effects or exposing secrets:
+
+```bash
+# Run safe PayPal OAuth diagnostic
+pnpm verify:paypal
+```
+
+When valid credentials are present, the CLI verifies the OAuth handshake and reports:
+
+- Authentication status (`SUCCESS` / `FAILED`)
+- Environment (`sandbox`)
+- Token expiry time in seconds
+- Associated App ID (if returned by PayPal)
+- **Never prints the raw access token, client secret, or Basic Authorization header.**
+
+If credentials are absent, the command safely reports:
+`Status: SKIPPED (No credentials configured)` and exits with code 0 without failing CI.
+
+### 4. PayPal Orders v2 Sandbox Order Lifecycle (Phase 1B)
+
+To test the real PayPal Sandbox order lifecycle (create order, inspect approval URL, and retrieve order state):
+
+```bash
+# Test PayPal Orders v2 Sandbox flow
+pnpm test:paypal-order
+```
+
+This diagnostic script:
+
+1. Contacts PayPal Sandbox `POST /v2/checkout/orders` using server-authoritative amounts ($1.00 USD).
+2. Extracts and displays the PayPal buyer approval link (`rel: "payer-action"` / `rel: "approve"`).
+3. Validates order state via `GET /v2/checkout/orders/{id}` (`PAYER_ACTION_REQUIRED`).
+4. Logs the created order ID and instructions for manual Sandbox buyer approval and capture.
+
+### 5. Running Unit and Integration Tests
+
+Unit tests simulate the full PayPal OAuth and Orders v2 lifecycle using mocked HTTP responses and require no live network or credentials:
+
+```bash
+# Run payment-service tests
+pnpm --filter @agentpay/payment-service test
+```

@@ -314,6 +314,85 @@ export function buildApp(clientOverride?: ServiceClient) {
     }
   });
 
+  // Get Payment Order
+  app.get('/api/payments/orders/:id', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const { id } = req.params as { id: string };
+
+    const order = await client.getPaymentOrder(id, correlationId);
+    if (!order) {
+      return reply.status(404).send({
+        error: {
+          code: ErrorCodes.NOT_FOUND,
+          message: `Order ${id} not found`,
+          correlationId,
+        },
+      });
+    }
+    return reply.status(200).send(order);
+  });
+
+  // Capture Payment Order
+  app.post('/api/payments/orders/:id/capture', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+    const { id } = req.params as { id: string };
+    const body = req.body as { policyDecisionId?: string; idempotencyKey?: string };
+
+    if (!body?.policyDecisionId) {
+      return reply.status(400).send({
+        error: {
+          code: ErrorCodes.VALIDATION_ERROR,
+          message: 'policyDecisionId is required to capture payment order',
+          correlationId,
+        },
+      });
+    }
+
+    const idempotencyKey =
+      (req.headers['x-idempotency-key'] as string) || body.idempotencyKey || `cap-${id}`;
+
+    try {
+      const result = await client.capturePaymentOrder(
+        id,
+        body.policyDecisionId,
+        correlationId,
+        idempotencyKey,
+      );
+
+      // Audit order capture
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: result.status === 'COMPLETED' ? 'ORDER_CAPTURED' : 'SYSTEM_SECURITY_ALERT',
+          actor: 'payment-service',
+          resourceId: result.captureId,
+          outcome: result.status,
+          metadata: {
+            orderId: id,
+            capturedAmountMinor: result.capturedAmountMinor,
+            currency: result.currency,
+            status: result.status,
+            environmentNote: result.environmentNote,
+          },
+        },
+        correlationId,
+      );
+
+      return reply.status(200).send(result);
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; statusCode?: number; message?: string };
+      reqLogger.error({ err }, 'Order capture failed');
+      return reply.status(errorObj.statusCode ?? 422).send({
+        error: {
+          code: errorObj.code ?? ErrorCodes.BAD_REQUEST,
+          message: errorObj.message ?? 'Failed to capture payment order',
+          correlationId,
+        },
+      });
+    }
+  });
+
   // List Recent Audit Events
   app.get('/api/audit-events', async (req, reply) => {
     const query = req.query as { limit?: string; correlationId?: string };

@@ -10,6 +10,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/migrations/001_create_audit_events.sql:/docker-entrypoint-initdb.d/001_create_audit_events.sql:ro
+      - ./db/migrations/002_create_payment_orders.sql:/docker-entrypoint-initdb.d/002_create_payment_orders.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-agentpay} -d ${POSTGRES_DB:-agentpay}']
       interval: 5s
@@ -89,6 +90,9 @@ services:
       dockerfile: services/payment-service/Dockerfile
     container_name: agentpay-payment-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -97,6 +101,7 @@ services:
       PAYMENT_PROVIDER: mock
       PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
       POLICY_SERVICE_URL: http://policy-service:4002
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agentpay}:${POSTGRES_PASSWORD:-agentpay_dev_pw}@postgres:5432/${POSTGRES_DB:-agentpay}
     healthcheck:
       test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4003/health']
       interval: 5s

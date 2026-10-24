@@ -79,6 +79,16 @@ export default function HomePage() {
   const [submitting, setSubmitting] = useState(false);
   const [activeProposal, setActiveProposal] = useState<PurchaseProposal | null>(null);
   const [activeDecision, setActiveDecision] = useState<PolicyDecision | null>(null);
+  const [activeOrder, setActiveOrder] = useState<{
+    id: string;
+    status: string;
+    currency: string;
+    amountMinor: number;
+    approvalUrl?: string;
+    captureId?: string;
+  } | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [captureResult, setCaptureResult] = useState<string | null>(null);
   const [paymentResult, setPaymentResult] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
 
@@ -125,6 +135,8 @@ export default function HomePage() {
       setSubmitting(true);
       setActiveProposal(null);
       setActiveDecision(null);
+      setActiveOrder(null);
+      setCaptureResult(null);
       setPaymentResult(null);
 
       // 1. Propose
@@ -171,8 +183,9 @@ export default function HomePage() {
         );
       } else {
         const orderData = await payRes.json();
+        setActiveOrder(orderData);
         setPaymentResult(
-          `Mock Order Created: ${orderData.id} (Status: ${orderData.status}) — MOCK/DEVELOPMENT Provider`,
+          `Order Created: ${orderData.id} (Status: ${orderData.status}) — ${orderData.approvalUrl ? 'Buyer Approval Required' : 'Order Ready'}`,
         );
       }
 
@@ -187,6 +200,44 @@ export default function HomePage() {
       setPaymentResult(`Simulation Error: ${message}`);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleCaptureOrder = async () => {
+    if (!activeOrder || !activeDecision) return;
+    try {
+      setCapturing(true);
+      setCaptureResult(null);
+
+      const res = await fetch(`/api/payments/orders/${activeOrder.id}/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ policyDecisionId: activeDecision.decisionId }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setCaptureResult(`Capture Failed: ${data.error?.code ?? 'ERROR'} — ${data.error?.message}`);
+      } else {
+        setCaptureResult(
+          `Capture Succeeded: ID ${data.captureId ?? data.id} (Status: ${data.status})`,
+        );
+        setActiveOrder((prev) =>
+          prev ? { ...prev, status: data.status, captureId: data.captureId } : null,
+        );
+      }
+
+      // Refresh Audit Trail
+      const auditRes = await fetch('/api/audit-events?limit=10');
+      if (auditRes.ok) {
+        const events = await auditRes.json();
+        setAuditEvents(events);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Capture error';
+      setCaptureResult(`Capture Error: ${msg}`);
+    } finally {
+      setCapturing(false);
     }
   };
 
@@ -413,6 +464,106 @@ export default function HomePage() {
               }}
             >
               {paymentResult}
+            </div>
+          )}
+
+          {activeOrder && (
+            <div
+              style={{
+                marginTop: '1.25rem',
+                padding: '1rem',
+                borderRadius: '8px',
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid var(--card-border)',
+              }}
+              data-testid="order-lifecycle-card"
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '0.75rem',
+                }}
+              >
+                <h4 style={{ fontSize: '0.9rem', fontWeight: 600, margin: 0 }}>
+                  Order Lifecycle Management
+                </h4>
+                <span className="badge badge-warning" data-testid="order-status-badge">
+                  {activeOrder.status}
+                </span>
+              </div>
+              <p
+                style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}
+              >
+                Order ID: <code style={{ fontFamily: 'var(--font-mono)' }}>{activeOrder.id}</code>
+              </p>
+
+              <div
+                style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}
+              >
+                {activeOrder.approvalUrl && (
+                  <a
+                    href={activeOrder.approvalUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="button-secondary"
+                    data-testid="paypal-approval-link"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      padding: '0.5rem 1rem',
+                      borderRadius: '6px',
+                      textDecoration: 'none',
+                      fontSize: '0.825rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    Approve in PayPal Sandbox ↗
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleCaptureOrder}
+                  disabled={capturing || activeOrder.status === 'COMPLETED'}
+                  className="button-primary"
+                  data-testid="capture-order-button"
+                  style={{
+                    padding: '0.5rem 1rem',
+                    fontSize: '0.825rem',
+                  }}
+                >
+                  {capturing
+                    ? 'Capturing...'
+                    : activeOrder.status === 'COMPLETED'
+                      ? 'Already Captured'
+                      : 'Capture Approved Order'}
+                </button>
+              </div>
+
+              {captureResult && (
+                <div
+                  style={{
+                    marginTop: '0.75rem',
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    fontFamily: 'var(--font-mono)',
+                    background: captureResult.startsWith('Capture Succeeded')
+                      ? 'rgba(34, 197, 94, 0.1)'
+                      : 'rgba(239, 68, 68, 0.1)',
+                    border: captureResult.startsWith('Capture Succeeded')
+                      ? '1px solid rgba(34, 197, 94, 0.3)'
+                      : '1px solid rgba(239, 68, 68, 0.3)',
+                    color: captureResult.startsWith('Capture Succeeded') ? '#4ade80' : '#f87171',
+                  }}
+                  data-testid="capture-result"
+                >
+                  {captureResult}
+                </div>
+              )}
             </div>
           )}
         </div>

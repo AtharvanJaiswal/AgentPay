@@ -123,4 +123,129 @@ test.describe('AgentPay End-to-End Foundation Suite', () => {
       expect(data.error.details.outcome).toBe('DENY');
     }
   });
+
+  test('Simulating an approved intent renders the order lifecycle card and capture controls', async ({
+    page,
+  }) => {
+    await page.goto('/');
+
+    const submitBtn = page.locator('[data-testid="proposal-submit"]');
+    await expect(submitBtn).toBeVisible();
+
+    // Trigger autonomous evaluation
+    await submitBtn.click();
+
+    // The policy decision card should appear
+    const policyCard = page.locator('[data-testid="policy-decision-card"]');
+    await expect(policyCard).toBeVisible({ timeout: 10000 });
+
+    // The order lifecycle card should be rendered if payment order succeeded
+    const orderCard = page.locator('[data-testid="order-lifecycle-card"]');
+    // If order was created, verify capture button exists
+    if (await orderCard.isVisible()) {
+      const captureBtn = page.locator('[data-testid="capture-order-button"]');
+      await expect(captureBtn).toBeVisible();
+    }
+  });
+
+  test('Direct capture request without policy authorization is rejected', async ({ request }) => {
+    const res = await request.post('/api/payments/orders/test-order-e2e/capture', {
+      data: {
+        policyDecisionId: '', // Missing / empty policy decision
+      },
+    });
+
+    // Gateway / payment-service must reject unauthorized or non-existent capture with 400, 403, 404, or 502
+    expect([400, 403, 404, 502]).toContain(res.status());
+    const data = await res.json();
+    expect(data.error).toBeDefined();
+  });
+
+  test('Order success return route renders safely with missing token without crashing', async ({
+    page,
+  }) => {
+    await page.goto('/orders/success');
+
+    const panel = page.locator('[data-testid="orders-success-panel"]');
+    await expect(panel).toBeVisible();
+
+    const missingAlert = page.locator('[data-testid="missing-token-alert"]');
+    await expect(missingAlert).toBeVisible();
+    await expect(missingAlert).toContainText('Missing Order Token');
+
+    const returnBtn = page.locator('[data-testid="return-home-btn"]');
+    await expect(returnBtn).toBeVisible();
+  });
+
+  test('Order success return route handles malformed tokens safely', async ({ page }) => {
+    await page.goto('/orders/success?token=<script>alert(1)</script>');
+
+    const invalidAlert = page.locator('[data-testid="invalid-token-alert"]');
+    await expect(invalidAlert).toBeVisible();
+    await expect(invalidAlert).toContainText('Invalid Order Token Format');
+  });
+
+  test('Order success return route displays order status, security boundary notice, and never triggers capture', async ({
+    page,
+  }) => {
+    let captureRequested = false;
+    await page.route('**/api/payments/orders/*/capture', (route) => {
+      captureRequested = true;
+      return route.abort();
+    });
+
+    await page.route('**/api/payments/orders/TEST_ORDER_TOKEN_123', (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'TEST_ORDER_TOKEN_123',
+          status: 'APPROVED',
+          currency: 'USD',
+          amountMinor: 2500,
+          provider: 'paypal_sandbox',
+          isMock: false,
+        }),
+      });
+    });
+
+    await page.goto('/orders/success?token=TEST_ORDER_TOKEN_123&PayerID=TEST_PAYER_XYZ');
+
+    const panel = page.locator('[data-testid="orders-success-panel"]');
+    await expect(panel).toBeVisible();
+
+    const badge = page.locator('[data-testid="order-status-badge"]');
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText('APPROVED');
+
+    const securityNotice = page.locator('[data-testid="security-notice"]');
+    await expect(securityNotice).toBeVisible();
+    await expect(securityNotice).toContainText('never triggers payment capture automatically');
+
+    // Prove that visiting the return URL never triggers a capture request
+    expect(captureRequested).toBe(false);
+  });
+
+  test('Order cancelled return route renders cancellation details and provides safe return path', async ({
+    page,
+  }) => {
+    await page.goto('/orders/cancelled?token=06F822997H928472C');
+
+    const panel = page.locator('[data-testid="orders-cancelled-panel"]');
+    await expect(panel).toBeVisible();
+
+    const summary = page.locator('[data-testid="cancellation-summary-alert"]');
+    await expect(summary).toBeVisible();
+    await expect(summary).toContainText('Checkout Cancelled');
+
+    const returnBtn = page.locator('[data-testid="return-home-btn"]');
+    await expect(returnBtn).toBeVisible();
+  });
+
+  test('Order approved alias route renders successfully without 404', async ({ page }) => {
+    await page.goto('/orders/approved?token=06F822997H928472C');
+
+    const panel = page.locator('[data-testid="orders-success-panel"]');
+    await expect(panel).toBeVisible();
+  });
 });

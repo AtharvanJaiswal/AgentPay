@@ -24,4 +24,18 @@ describe('Database Migrations Verification', () => {
     expect(sql).toContain('idx_audit_events_timestamp');
     expect(sql).toContain('TIMESTAMPTZ');
   });
+
+  it('002_create_payment_orders.sql defines payment_orders and webhook_events tables and indexes', () => {
+    const sql = fs.readFileSync(path.join(migrationsDir, '002_create_payment_orders.sql'), 'utf-8');
+
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS payment_orders');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS webhook_events');
+    expect(sql).toContain('id VARCHAR(128) PRIMARY KEY');
+    expect(sql).toContain('proposal_id UUID NOT NULL');
+    expect(sql).toContain('policy_decision_id UUID NOT NULL');
+    expect(sql).toContain('idempotency_key VARCHAR(128) UNIQUE');
+    expect(sql).toContain('idx_payment_orders_proposal');
+    expect(sql).toContain('idx_payment_orders_status');
+    expect(sql).toContain('idx_webhook_events_resource_id');
+  });
 });

@@ -5,6 +5,7 @@ import type {
   PurchaseProposal,
   PolicyDecision,
   PaymentOrder,
+  PaymentCaptureResult,
   AuditEvent,
   CreateAuditEventInput,
 } from '@agentpay/contracts';
@@ -101,6 +102,58 @@ export class ServiceClient {
       throw err;
     }
     return body as unknown as PaymentOrder;
+  }
+
+  async getPaymentOrder(orderId: string, correlationId: string): Promise<PaymentOrder | null> {
+    try {
+      const res = await request(
+        `${this.config.PAYMENT_SERVICE_URL}/orders/${encodeURIComponent(orderId)}`,
+        {
+          method: 'GET',
+          headers: {
+            'x-correlation-id': correlationId,
+          },
+          headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+        },
+      );
+
+      if (res.statusCode === 200) {
+        return (await res.body.json()) as PaymentOrder;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async capturePaymentOrder(
+    orderId: string,
+    policyDecisionId: string,
+    correlationId: string,
+    idempotencyKey?: string,
+  ): Promise<PaymentCaptureResult> {
+    const res = await request(
+      `${this.config.PAYMENT_SERVICE_URL}/orders/${encodeURIComponent(orderId)}/capture`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-correlation-id': correlationId,
+          ...(idempotencyKey ? { 'x-idempotency-key': idempotencyKey } : {}),
+        },
+        body: JSON.stringify({ policyDecisionId, idempotencyKey }),
+        headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+      },
+    );
+
+    const body = (await res.body.json()) as { error?: { code?: string; message?: string } };
+    if (res.statusCode !== 200 && res.statusCode !== 202) {
+      const err = new Error(body?.error?.message ?? 'Payment capture error');
+      (err as unknown as { code?: string; statusCode?: number }).code = body?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+    return body as unknown as PaymentCaptureResult;
   }
 
   async recordAuditEvent(

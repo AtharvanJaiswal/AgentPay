@@ -109,4 +109,76 @@ describe('API Gateway', () => {
       expect.any(String),
     );
   });
+
+  it('GET /api/payments/orders/:id returns order from client', async () => {
+    const mockOrder = {
+      id: 'ORDER-123',
+      proposalId: '11111111-1111-4111-a111-111111111111',
+      provider: 'paypal_sandbox' as const,
+      status: 'PAYER_ACTION_REQUIRED' as const,
+      amountMinor: 2500,
+      currency: 'USD' as const,
+      isMock: false,
+      approvalUrl: 'https://sandbox.paypal.com/checkout?token=123',
+      createdAt: new Date().toISOString(),
+      environmentNote: 'Sandbox',
+    };
+
+    const mockClient = {
+      getPaymentOrder: vi.fn().mockResolvedValue(mockOrder),
+    } as unknown as ServiceClient;
+
+    const app = buildApp(mockClient);
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/payments/orders/ORDER-123',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.id).toBe('ORDER-123');
+    expect(body.approvalUrl).toBe('https://sandbox.paypal.com/checkout?token=123');
+  });
+
+  it('POST /api/payments/orders/:id/capture captures order and records audit event', async () => {
+    const mockCaptureResult = {
+      captureId: 'CAPTURE-456',
+      orderId: 'ORDER-123',
+      status: 'COMPLETED' as const,
+      capturedAmountMinor: 2500,
+      currency: 'USD' as const,
+      isMock: false,
+      timestamp: new Date().toISOString(),
+      environmentNote: 'Sandbox capture',
+    };
+
+    const mockCapturePaymentOrder = vi.fn().mockResolvedValue(mockCaptureResult);
+    const mockRecordAuditEvent = vi.fn().mockResolvedValue(null);
+
+    const mockClient = {
+      capturePaymentOrder: mockCapturePaymentOrder,
+      recordAuditEvent: mockRecordAuditEvent,
+    } as unknown as ServiceClient;
+
+    const app = buildApp(mockClient);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/payments/orders/ORDER-123/capture',
+      payload: {
+        policyDecisionId: '33333333-3333-4333-a333-333333333333',
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.status).toBe('COMPLETED');
+    expect(body.captureId).toBe('CAPTURE-456');
+    expect(mockRecordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'ORDER_CAPTURED',
+        resourceId: 'CAPTURE-456',
+      }),
+      expect.any(String),
+    );
+  });
 });

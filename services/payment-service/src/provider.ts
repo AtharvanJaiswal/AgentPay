@@ -4,6 +4,8 @@ import type {
   PaymentOrder,
   PaymentCaptureResult,
   PurchaseProposal,
+  CreateOrderOptions,
+  CaptureOrderOptions,
 } from '@agentpay/contracts';
 
 export class MockPaymentProvider implements PaymentProvider {
@@ -11,8 +13,13 @@ export class MockPaymentProvider implements PaymentProvider {
   readonly isMock = true;
 
   private orders = new Map<string, PaymentOrder>();
+  private orderPolicyDecisions = new Map<string, string>();
 
-  async createOrder(proposal: PurchaseProposal, _correlationId: string): Promise<PaymentOrder> {
+  async createOrder(
+    proposal: PurchaseProposal,
+    _correlationId: string,
+    options?: CreateOrderOptions,
+  ): Promise<PaymentOrder> {
     const orderId = `MOCK-ORDER-${uuidv4().substring(0, 8).toUpperCase()}`;
     const order: PaymentOrder = {
       id: orderId,
@@ -29,6 +36,9 @@ export class MockPaymentProvider implements PaymentProvider {
     };
 
     this.orders.set(orderId, order);
+    if (options?.policyDecisionId) {
+      this.orderPolicyDecisions.set(orderId, options.policyDecisionId);
+    }
     return order;
   }
 
@@ -38,12 +48,24 @@ export class MockPaymentProvider implements PaymentProvider {
 
   async captureOrder(
     orderId: string,
-    _policyDecisionId: string,
+    policyDecisionId: string,
     _correlationId: string,
+    _options?: CaptureOrderOptions,
   ): Promise<PaymentCaptureResult> {
+    if (!policyDecisionId || policyDecisionId.trim().length === 0) {
+      throw new Error('Valid policyDecisionId is required');
+    }
+
     const existingOrder = this.orders.get(orderId);
     if (!existingOrder) {
       throw new Error(`Order ${orderId} not found`);
+    }
+
+    const authorizedDecisionId = this.orderPolicyDecisions.get(orderId);
+    if (authorizedDecisionId && authorizedDecisionId !== policyDecisionId) {
+      throw new Error(
+        `Policy decision ID mismatch: provided '${policyDecisionId}' does not match order authorization '${authorizedDecisionId}'`,
+      );
     }
 
     if (existingOrder.status === 'COMPLETED') {
