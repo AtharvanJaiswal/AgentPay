@@ -85,18 +85,47 @@ export function buildApp(clientOverride?: ServiceClient) {
 
   // Platform Status Endpoint for Web UI
   app.get('/api/status', async (_req, reply) => {
+    const paymentHealth = await client.checkServiceHealth(config.PAYMENT_SERVICE_URL);
+    const paymentDetails = paymentHealth?.details as
+      | {
+          provider?: string;
+          isMock?: boolean;
+          paymentsEnabled?: boolean;
+          oauthConfigured?: boolean;
+        }
+      | undefined;
+
+    const isSandboxActive = Boolean(
+      paymentDetails && !paymentDetails.isMock && paymentDetails.provider === 'PayPal Sandbox',
+    );
+    const activeProvider = paymentDetails?.provider ?? 'MOCK/DEVELOPMENT';
+    const isMock = paymentDetails?.isMock ?? true;
+    const paymentsEnabled = paymentDetails?.paymentsEnabled ?? false;
+    const paypalConfigured = Boolean(paymentDetails?.oauthConfigured || isSandboxActive);
+
+    const statusLabel = isSandboxActive
+      ? paymentsEnabled
+        ? 'PayPal Sandbox Active (Payments Enabled)'
+        : 'PayPal Sandbox Active (Capture Disabled)'
+      : 'Sandbox not configured (Mock Provider Active)';
+
+    const warning = isSandboxActive
+      ? paymentsEnabled
+        ? 'PayPal Sandbox Orders v2 is active with live capture enabled for test orders.'
+        : 'PayPal Sandbox Orders v2 is active. Real payment capture is disabled by default configuration.'
+      : 'Real payment capture is disabled. PayPal Sandbox credentials and OAuth verification will be configured in a subsequent phase.';
+
     return reply.status(200).send({
       platform: 'AgentPay',
       version: '0.1.0-foundation',
       timestamp: new Date().toISOString(),
       providerStatus: {
-        activeProvider: 'MOCK/DEVELOPMENT',
-        isMock: true,
-        paypalSandboxConfigured: false,
-        statusLabel: 'Sandbox not configured (Mock Provider Active)',
-        paymentsEnabled: false,
-        warning:
-          'Real payment capture is disabled. PayPal Sandbox credentials and OAuth verification will be configured in a subsequent phase.',
+        activeProvider,
+        isMock,
+        paypalSandboxConfigured: paypalConfigured,
+        statusLabel,
+        paymentsEnabled,
+        warning,
       },
       security: {
         policyEngineActive: true,

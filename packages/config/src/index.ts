@@ -118,6 +118,7 @@ export const PaymentServiceConfigSchema = BaseConfigSchema.extend({
   PAYPAL_ENVIRONMENT: z.enum(['sandbox', 'live']).default('sandbox'),
   PAYPAL_API_BASE_URL: z.string().url().default('https://api-m.sandbox.paypal.com'),
   PAYPAL_WEBHOOK_ID: z.string().optional(),
+  APP_BASE_URL: z.string().url().default('http://localhost:3000'),
 }).superRefine((data, ctx) => {
   // Prohibit Live environment in Phase 1B
   if (data.PAYPAL_ENVIRONMENT === 'live') {

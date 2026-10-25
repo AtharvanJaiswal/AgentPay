@@ -1,8 +1,10 @@
+import fs from 'node:fs';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PayPalOAuthClient, PayPalOAuthError } from '../src/paypal/oauth-client.js';
 import { PayPalPaymentProvider } from '../src/paypal/provider.js';
 import { buildApp } from '../src/app.js';
 import { runPayPalAuthVerification } from '../src/cli/verify-paypal.js';
+import { configurePayPalMcp } from '../src/cli/configure-paypal-mcp.js';
 import { PaymentServiceConfigSchema } from '@agentpay/config';
 
 describe('PayPal Sandbox OAuth Client & Provider', () => {
@@ -430,6 +432,71 @@ describe('PayPal Sandbox OAuth Client & Provider', () => {
       const logged = consoleSpy.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(logged).toContain('Authentication Result: FAILED');
       expect(logged).not.toContain(dummyClientSecret);
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('PayPal MCP Configuration CLI & Security Controls', () => {
+    it('returns failure result when credentials are missing', async () => {
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const result = await configurePayPalMcp({
+        PAYPAL_CLIENT_ID: '',
+        PAYPAL_CLIENT_SECRET: '',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.message).toBe('Missing credentials');
+      consoleSpy.mockRestore();
+    });
+
+    it('injects temporary token without printing secrets or creating orders', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'MOCK_SECRET_MCP_TOKEN_NOT_LOGGED',
+          token_type: 'Bearer',
+          expires_in: 32400,
+          app_id: 'TEST_MCP_APP_ID',
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const fakeConfig = {
+        mcpServers: {
+          existingServer: { command: 'node' },
+        },
+      };
+
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(fakeConfig));
+      const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const result = await configurePayPalMcp({
+        PAYPAL_CLIENT_ID: dummyClientId,
+        PAYPAL_CLIENT_SECRET: dummyClientSecret,
+        PAYPAL_ENVIRONMENT: 'sandbox',
+      });
+
+      expect(result.success).toBe(true);
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+
+      const writtenPayload = JSON.parse(writeSpy.mock.calls[0][1] as string);
+      expect(writtenPayload.mcpServers.paypal).toBeDefined();
+      expect(writtenPayload.mcpServers.paypal.env.PAYPAL_ACCESS_TOKEN).toBe(
+        'MOCK_SECRET_MCP_TOKEN_NOT_LOGGED',
+      );
+      expect(writtenPayload.mcpServers.paypal.env.PAYPAL_ENVIRONMENT).toBe('SANDBOX');
+      expect(writtenPayload.mcpServers.existingServer).toBeDefined();
+
+      const logged = consoleSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(logged).toContain('Status: READY');
+      expect(logged).not.toContain('MOCK_SECRET_MCP_TOKEN_NOT_LOGGED');
+      expect(logged).not.toContain(dummyClientSecret);
+      expect(logged).toContain('0 orders created, 0 orders captured.');
+
       consoleSpy.mockRestore();
     });
   });

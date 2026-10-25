@@ -7,7 +7,15 @@ import { ErrorCodes } from '@agentpay/contracts';
 describe('API Gateway', () => {
   it('GET /api/status returns mock status and sandbox unconfigured banner info', async () => {
     const mockClient = {
-      checkServiceHealth: vi.fn().mockResolvedValue({ status: 'ok' }),
+      checkServiceHealth: vi.fn().mockResolvedValue({
+        status: 'ok',
+        details: {
+          provider: 'MOCK/DEVELOPMENT',
+          isMock: true,
+          paymentsEnabled: false,
+          oauthConfigured: false,
+        },
+      }),
     } as unknown as ServiceClient;
 
     const app = buildApp(mockClient);
@@ -20,8 +28,39 @@ describe('API Gateway', () => {
     const body = JSON.parse(res.body);
     expect(body.platform).toBe('AgentPay');
     expect(body.providerStatus.activeProvider).toBe('MOCK/DEVELOPMENT');
+    expect(body.providerStatus.isMock).toBe(true);
     expect(body.providerStatus.paypalSandboxConfigured).toBe(false);
     expect(body.providerStatus.statusLabel).toContain('Sandbox not configured');
+    expect(body.providerStatus.paymentsEnabled).toBe(false);
+  });
+
+  it('GET /api/status dynamically reflects PayPal Sandbox provider when active', async () => {
+    const mockClient = {
+      checkServiceHealth: vi.fn().mockResolvedValue({
+        status: 'ok',
+        details: {
+          provider: 'PayPal Sandbox',
+          isMock: false,
+          paymentsEnabled: false,
+          oauthConfigured: true,
+        },
+      }),
+    } as unknown as ServiceClient;
+
+    const app = buildApp(mockClient);
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/status',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.providerStatus.activeProvider).toBe('PayPal Sandbox');
+    expect(body.providerStatus.isMock).toBe(false);
+    expect(body.providerStatus.paypalSandboxConfigured).toBe(true);
+    expect(body.providerStatus.statusLabel).toBe('PayPal Sandbox Active (Capture Disabled)');
+    expect(body.providerStatus.paymentsEnabled).toBe(false);
+    expect(body.providerStatus.warning).toContain('Real payment capture is disabled by default');
   });
 
   it('GET /api/health reports gateway status and downstream checks', async () => {
@@ -180,5 +219,87 @@ describe('API Gateway', () => {
       }),
       expect.any(String),
     );
+  });
+
+  describe('Capture Forwarding & PAYMENTS_DISABLED Propagation (Test Group 4)', () => {
+    it('propagates downstream 403 PAYMENTS_DISABLED without converting to success or fallback', async () => {
+      const paymentsDisabledError = Object.assign(
+        new Error('Payment capture is disabled by configuration'),
+        {
+          code: ErrorCodes.PAYMENTS_DISABLED,
+          statusCode: 403,
+        },
+      );
+
+      const mockCapturePaymentOrder = vi.fn().mockRejectedValue(paymentsDisabledError);
+      const mockRecordAuditEvent = vi.fn();
+
+      const mockClient = {
+        capturePaymentOrder: mockCapturePaymentOrder,
+        recordAuditEvent: mockRecordAuditEvent,
+      } as unknown as ServiceClient;
+
+      const app = buildApp(mockClient);
+      const correlationId = 'test-corr-cap-403';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/payments/orders/1MS29453RW109660R/capture',
+        headers: {
+          'x-correlation-id': correlationId,
+        },
+        payload: {
+          policyDecisionId: '33333333-3333-4333-a333-333333333333',
+        },
+      });
+
+      // Assert status 403
+      expect(res.statusCode).toBe(403);
+      const body = JSON.parse(res.body);
+
+      // Assert error code
+      expect(body.error.code).toBe(ErrorCodes.PAYMENTS_DISABLED);
+      expect(body.error.message).toBe('Payment capture is disabled by configuration');
+
+      // Assert correlation ID propagation
+      expect(body.error.correlationId).toBe(correlationId);
+      expect(res.headers['x-correlation-id']).toBe(correlationId);
+
+      // Assert captureOrder was forwarded
+      expect(mockCapturePaymentOrder).toHaveBeenCalledWith(
+        '1MS29453RW109660R',
+        '33333333-3333-4333-a333-333333333333',
+        correlationId,
+        expect.any(String),
+      );
+
+      // CRITICAL: Zero ORDER_CAPTURED audit events recorded
+      expect(mockRecordAuditEvent).toHaveBeenCalledTimes(0);
+
+      // Secret leakage prevention check
+      const responseText = res.body;
+      expect(responseText).not.toContain('secret');
+      expect(responseText).not.toContain('Bearer');
+      expect(responseText).not.toContain('token');
+    });
+
+    it('rejects capture request with 400 when policyDecisionId is missing', async () => {
+      const mockCapturePaymentOrder = vi.fn();
+      const mockClient = {
+        capturePaymentOrder: mockCapturePaymentOrder,
+      } as unknown as ServiceClient;
+
+      const app = buildApp(mockClient);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/payments/orders/ORDER-123/capture',
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(400);
+      const body = JSON.parse(res.body);
+      expect(body.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
+      expect(mockCapturePaymentOrder).toHaveBeenCalledTimes(0);
+    });
   });
 });

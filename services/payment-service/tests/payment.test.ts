@@ -117,4 +117,90 @@ describe('Payment Service', () => {
     });
     expect(doubleCap.statusCode).toBe(422);
   });
+
+  describe('Provider Selection & Safety Safeguards', () => {
+    it('defaults to MockPaymentProvider when PAYMENT_PROVIDER is mock without override', async () => {
+      const app = buildApp(undefined, {
+        PAYMENT_PROVIDER: 'mock',
+        PAYMENTS_ENABLED: false,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/health',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.details.provider).toBe('MOCK/DEVELOPMENT');
+      expect(body.details.isMock).toBe(true);
+      expect(body.details.paymentsEnabled).toBe(false);
+    });
+
+    it('falls back to MockPaymentProvider when credentials are missing for paypal_sandbox', async () => {
+      const app = buildApp(undefined, {
+        PAYMENT_PROVIDER: 'paypal_sandbox',
+        PAYPAL_CLIENT_ID: undefined,
+        PAYPAL_CLIENT_SECRET: undefined,
+        PAYMENTS_ENABLED: false,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/health',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.details.provider).toBe('MOCK/DEVELOPMENT');
+      expect(body.details.isMock).toBe(true);
+      expect(body.details.oauthConfigured).toBe(false);
+    });
+
+    it('initializes PayPalPaymentProvider when PAYMENT_PROVIDER is paypal_sandbox with credentials', async () => {
+      const app = buildApp(undefined, {
+        PAYMENT_PROVIDER: 'paypal_sandbox',
+        PAYPAL_CLIENT_ID: 'mock_sandbox_id_123',
+        PAYPAL_CLIENT_SECRET: 'mock_sandbox_secret_456',
+        PAYPAL_ENVIRONMENT: 'sandbox',
+        PAYPAL_API_BASE_URL: 'https://api-m.sandbox.paypal.com',
+        APP_BASE_URL: 'http://localhost:3000',
+        PAYMENTS_ENABLED: false,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/health',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.details.provider).toBe('PayPal Sandbox');
+      expect(body.details.isMock).toBe(false);
+      expect(body.details.oauthConfigured).toBe(true);
+      expect(body.details.paymentsEnabled).toBe(false);
+    });
+
+    it('blocks order capture with 403 PAYMENTS_DISABLED when PAYMENTS_ENABLED is false on PayPal provider', async () => {
+      const app = buildApp(undefined, {
+        PAYMENT_PROVIDER: 'paypal_sandbox',
+        PAYPAL_CLIENT_ID: 'mock_sandbox_id_123',
+        PAYPAL_CLIENT_SECRET: 'mock_sandbox_secret_456',
+        PAYMENTS_ENABLED: false,
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/orders/MOCK-ORDER-123/capture',
+        payload: {
+          policyDecisionId: uuidv4(),
+        },
+      });
+
+      expect(res.statusCode).toBe(403);
+      const body = JSON.parse(res.body);
+      expect(body.error.code).toBe(ErrorCodes.PAYMENTS_DISABLED);
+      expect(body.error.message).toContain('Payment capture is disabled');
+    });
+  });
 });

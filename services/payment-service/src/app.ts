@@ -65,6 +65,7 @@ export function buildApp(
       clientSecret: config.PAYPAL_CLIENT_SECRET,
       environment: config.PAYPAL_ENVIRONMENT,
       apiBaseUrl: config.PAYPAL_API_BASE_URL,
+      appBaseUrl: config.APP_BASE_URL,
       webhookId: config.PAYPAL_WEBHOOK_ID,
       repository,
     });

@@ -98,10 +98,16 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: 4003
       HOST: 0.0.0.0
-      PAYMENT_PROVIDER: mock
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
       PAYMENTS_ENABLED: ${PAYMENTS_ENABLED:-false}
       POLICY_SERVICE_URL: http://policy-service:4002
       DATABASE_URL: postgresql://${POSTGRES_USER:-agentpay}:${POSTGRES_PASSWORD:-agentpay_dev_pw}@postgres:5432/${POSTGRES_DB:-agentpay}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENVIRONMENT: ${PAYPAL_ENVIRONMENT:-sandbox}
+      PAYPAL_API_BASE_URL: ${PAYPAL_API_BASE_URL:-https://api-m.sandbox.paypal.com}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
     healthcheck:
       test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:4003/health']
       interval: 5s

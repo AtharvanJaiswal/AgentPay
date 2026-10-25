@@ -272,14 +272,18 @@ export default function HomePage() {
 
       {/* Explicit Sandbox Warning Banner */}
       <div className="warning-banner" data-testid="sandbox-warning-banner">
-        <div className="warning-icon">⚠️</div>
+        <div className="warning-icon">
+          {platformStatus?.providerStatus?.isMock === false ? 'ℹ️' : '⚠️'}
+        </div>
         <div className="warning-text">
-          <h4>Provider Status: Sandbox not configured</h4>
+          <h4>
+            Provider Status:{' '}
+            {platformStatus?.providerStatus?.statusLabel ??
+              'Sandbox not configured (Mock Provider Active)'}
+          </h4>
           <p>
-            AgentPay is running in engineering foundation mode. The payment service operates behind
-            a <strong>MOCK/DEVELOPMENT</strong> provider and real payment capture is disabled by
-            default. PayPal Sandbox OAuth credentials and live execution will be verified in a
-            subsequent milestone.
+            {platformStatus?.providerStatus?.warning ??
+              'AgentPay is running in engineering foundation mode. The payment service operates behind a MOCK/DEVELOPMENT provider and real payment capture is disabled by default. PayPal Sandbox OAuth credentials and live execution will be verified in a subsequent milestone.'}
           </p>
         </div>
       </div>
@@ -329,12 +333,17 @@ export default function HomePage() {
         <div className="glass-panel service-card">
           <div className="service-header">
             <span className="service-name">Payment Service</span>
-            <span className="badge badge-warning">Mock Only</span>
+            <span
+              className={`badge ${platformStatus?.providerStatus?.isMock === false ? 'badge-info' : 'badge-warning'}`}
+            >
+              {platformStatus?.providerStatus?.isMock === false ? 'PayPal Sandbox' : 'Mock Only'}
+            </span>
           </div>
           <span className="service-port">PORT 4003</span>
           <p className="service-desc">
-            PaymentProvider abstraction with Mock adapter. Real captures disabled until PayPal
-            verification.
+            {platformStatus?.providerStatus?.isMock === false
+              ? 'PayPal Orders v2 Sandbox provider active with server-side policy and idempotency controls.'
+              : 'PaymentProvider abstraction with Mock adapter. Real captures disabled until PayPal verification.'}
           </p>
         </div>
 

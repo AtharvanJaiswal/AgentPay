@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "verify:paypal": "tsx src/cli/verify-paypal.ts",
     "test:paypal-order": "tsx src/cli/test-sandbox-order.ts",
+    "paypal:mcp": "tsx src/paypal/mcp-wrapper.ts",
     "test": "vitest run"
   },
   "dependencies": {

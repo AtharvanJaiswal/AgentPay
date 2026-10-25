@@ -18,6 +18,7 @@
     "test:e2e": "playwright test",
     "verify:paypal": "pnpm --filter @agentpay/payment-service verify:paypal",
     "test:paypal-order": "pnpm --filter @agentpay/payment-service test:paypal-order",
+    "paypal:mcp": "pnpm --filter @agentpay/payment-service paypal:mcp",
     "db:migrate": "tsx db/migrate.ts",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d --build",
