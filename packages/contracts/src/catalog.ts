@@ -1,3 +1,5 @@
+import type { ProductCandidate } from './product-discovery.js';
+
 /**
  * Authoritative development catalog.
  * Prices, categories, and merchants are authoritative and verified by the platform,
@@ -125,4 +127,44 @@ export function resolveCatalogItem(query: string, merchantPreference?: string): 
   }
 
   return null;
+}
+
+/**
+ * Converts an internal CatalogItem to a normalized ProductCandidate.
+ */
+export function catalogItemToCandidate(
+  item: CatalogItem,
+  providerId = 'dev-catalog',
+): ProductCandidate {
+  return {
+    providerId,
+    providerProductId: item.id,
+    merchantId: item.merchantId,
+    merchantName: item.merchantName,
+    title: item.name,
+    productUrl: `https://${item.merchantId}.catalog.agentpay.local/products/${item.id}`,
+    unitPriceMinor: item.unitPriceMinor,
+    currency: item.currency,
+    currencyDecimals: 2,
+    priceFreshnessTimestamp: new Date().toISOString(),
+    priceProvenance: 'PROVIDER_VERIFIED',
+    availability: 'IN_STOCK',
+    category: item.category,
+    dedupeKey: `${providerId}:${item.id}`,
+  };
+}
+
+/**
+ * Converts a verified ProductCandidate into an internal CatalogItem.
+ */
+export function candidateToCatalogItem(candidate: ProductCandidate): CatalogItem {
+  return {
+    id: candidate.providerProductId,
+    name: candidate.title,
+    unitPriceMinor: candidate.unitPriceMinor,
+    currency: candidate.currency,
+    merchantId: candidate.merchantId,
+    merchantName: candidate.merchantName,
+    category: candidate.category || 'general',
+  };
 }

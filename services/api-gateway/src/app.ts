@@ -6,7 +6,8 @@ import {
   CreateProposalInputSchema,
   CreatePurchaseIntentInputSchema,
   PurchaseProposalSchema,
-  resolveCatalogItem,
+  ProductSearchQuerySchema,
+  candidateToCatalogItem,
   computeIntentFingerprint,
   safeIntegerMultiply,
   safeIntegerAdd,
@@ -16,6 +17,8 @@ import {
   type PurchaseProposal,
   type PurchaseIntentParseResult,
   type PolicyDecision,
+  type ProductCandidate,
+  type CatalogItem,
 } from '@agentpay/contracts';
 import { createLogger, getChildLogger } from '@agentpay/logger';
 import { getApiGatewayConfig, type ApiGatewayConfig } from '@agentpay/config';
@@ -26,11 +29,14 @@ import {
   ProductionPendingAuthenticationProvider,
   TestAuthenticationProvider,
 } from './auth.js';
+import { CatalogResolver } from './catalog/resolver.js';
+import { MockProductDiscoveryProvider, HttpProductDiscoveryProvider } from './catalog/provider.js';
 
 export function buildApp(
   clientOverride?: ServiceClient,
   configOverride?: ApiGatewayConfig,
   authProviderOverride?: AuthenticationProvider,
+  catalogResolverOverride?: CatalogResolver,
 ) {
   const config = configOverride ?? getApiGatewayConfig();
   const client = clientOverride ?? new ServiceClient(config);
@@ -41,6 +47,17 @@ export function buildApp(
       : config.ALLOW_DEV_IDENTITY && config.NODE_ENV !== 'production'
         ? new DevelopmentAuthenticationProvider(config)
         : new ProductionPendingAuthenticationProvider());
+  const catalogResolver =
+    catalogResolverOverride ??
+    new CatalogResolver(
+      config.PRODUCT_DISCOVERY_PROVIDER === 'http' && config.PRODUCT_DISCOVERY_API_URL
+        ? new HttpProductDiscoveryProvider(
+            config.PRODUCT_DISCOVERY_API_URL,
+            config.PRODUCT_DISCOVERY_API_KEY,
+            config.PRODUCT_DISCOVERY_TIMEOUT_MS,
+          )
+        : new MockProductDiscoveryProvider(),
+    );
   const startTime = Date.now();
   const logger = createLogger({ serviceName: 'api-gateway', level: config.LOG_LEVEL });
 
@@ -159,6 +176,112 @@ export function buildApp(
         auditTrailEnabled: true,
       },
     });
+  });
+
+  // Product Discovery Search Endpoint
+  // Authenticated, bounded pagination, deterministic deduplication and ranking
+  app.post('/api/products/search', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+
+    // 1. Caller Authentication & Scope (fail closed in production)
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      reqLogger.warn('Unauthenticated request to /api/products/search rejected');
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to search products.',
+          correlationId,
+        },
+      });
+    }
+
+    // 2. Query Validation
+    const parseResult = ProductSearchQuerySchema.safeParse(req.body);
+    if (!parseResult.success) {
+      reqLogger.warn({ issues: parseResult.error.issues }, 'Invalid product search query received');
+      return reply.status(400).send({
+        error: {
+          code: ErrorCodes.VALIDATION_ERROR,
+          message: 'Invalid product search query payload',
+          correlationId,
+          details: parseResult.error.issues,
+        },
+      });
+    }
+
+    const query = parseResult.data;
+    reqLogger.info(
+      { principalId: principal.id, query: query.query, merchant: query.merchantPreference },
+      'Processing product discovery search',
+    );
+
+    const searchResourceId = `search-${uuidv4()}`;
+
+    // Audit search request
+    await client.recordAuditEvent(
+      {
+        correlationId,
+        eventType: 'PRODUCT_SEARCH_REQUESTED',
+        actor: principal.id,
+        resourceId: searchResourceId,
+        outcome: 'REQUESTED',
+        metadata: { query: query.query, maxResults: query.maxResults },
+      },
+      correlationId,
+    );
+
+    try {
+      const searchResult = await catalogResolver.search(query, {
+        timeoutMs: config.PRODUCT_DISCOVERY_TIMEOUT_MS,
+      });
+
+      // Audit search success
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PRODUCT_SEARCH_SUCCEEDED',
+          actor: principal.id,
+          resourceId: searchResourceId,
+          outcome: searchResult.status,
+          metadata: {
+            candidateCount: searchResult.candidates.length,
+            providerId: searchResult.providerId,
+            durationMs: searchResult.executionTimeMs,
+          },
+        },
+        correlationId,
+      );
+
+      return reply.status(200).send(searchResult);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Product discovery search failed';
+      reqLogger.error({ err }, 'Product discovery search failed');
+
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PRODUCT_SEARCH_FAILED',
+          actor: principal.id,
+          resourceId: searchResourceId,
+          outcome: 'FAILED',
+          metadata: { message },
+        },
+        correlationId,
+      );
+
+      const isTimeout =
+        message.toLowerCase().includes('timeout') || message.toLowerCase().includes('aborted');
+      return reply.status(isTimeout ? 504 : 502).send({
+        error: {
+          code: isTimeout ? ErrorCodes.TIMEOUT : ErrorCodes.SERVICE_UNAVAILABLE,
+          message,
+          correlationId,
+        },
+      });
+    }
   });
 
   // Orchestrated Purchase Intent Workflow:
@@ -306,11 +429,177 @@ export function buildApp(
 
     const intent = parsedResult.intent;
 
-    // 4. Authoritative Product Catalog Resolution
-    const catalogItem = resolveCatalogItem(
-      intent.intent.productQuery,
-      intent.intent.merchantPreference,
-    );
+    // 4. Authoritative Product Catalog Resolution & Revalidation
+    let catalogItem: CatalogItem | null = null;
+    let selectedCandidateData: ProductCandidate | null = null;
+
+    if (parseResult.data.selectedCandidate) {
+      const selection = parseResult.data.selectedCandidate;
+      reqLogger.info(
+        { productId: selection.providerProductId, providerId: selection.providerId },
+        'Revalidating selected product candidate',
+      );
+
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PRODUCT_SELECTION_REQUESTED',
+          actor: principalId,
+          resourceId: selection.providerProductId,
+          outcome: 'REQUESTED',
+          metadata: {
+            expectedPriceMinor: selection.expectedUnitPriceMinor,
+            expectedCurrency: selection.expectedCurrency,
+          },
+        },
+        correlationId,
+      );
+
+      const revalidation = await catalogResolver.revalidateCandidate(selection.providerProductId, {
+        expectedPriceMinor: selection.expectedUnitPriceMinor,
+        expectedCurrency: selection.expectedCurrency,
+        timeoutMs: config.PRODUCT_DISCOVERY_TIMEOUT_MS,
+      });
+
+      if (revalidation.status === 'NOT_FOUND') {
+        await client.recordAuditEvent(
+          {
+            correlationId,
+            eventType: 'PRODUCT_REVALIDATION_FAILED',
+            actor: principalId,
+            resourceId: selection.providerProductId,
+            outcome: 'NOT_FOUND',
+            metadata: { message: revalidation.message },
+          },
+          correlationId,
+        );
+
+        return reply.status(404).send({
+          error: {
+            code: ErrorCodes.PRODUCT_NOT_FOUND,
+            message: revalidation.message,
+            correlationId,
+          },
+        });
+      }
+
+      if (revalidation.status === 'OUT_OF_STOCK') {
+        return reply.status(422).send({
+          error: {
+            code: ErrorCodes.OUT_OF_STOCK,
+            message: revalidation.message,
+            correlationId,
+          },
+        });
+      }
+
+      if (revalidation.status === 'PRICE_CHANGED') {
+        await client.recordAuditEvent(
+          {
+            correlationId,
+            eventType: 'PRODUCT_PRICE_CHANGED',
+            actor: principalId,
+            resourceId: selection.providerProductId,
+            outcome: 'PRICE_CHANGED',
+            metadata: {
+              previousPriceMinor: revalidation.previousPriceMinor,
+              currentPriceMinor: revalidation.currentPriceMinor,
+              currency: revalidation.currency,
+            },
+          },
+          correlationId,
+        );
+
+        return reply.status(409).send({
+          outcome: 'PRICE_CHANGED_RECONFIRMATION_REQUIRED',
+          error: {
+            code: ErrorCodes.PRICE_CHANGED,
+            message: revalidation.message,
+            previousPriceMinor: revalidation.previousPriceMinor,
+            currentPriceMinor: revalidation.currentPriceMinor,
+            currency: revalidation.currency,
+            correlationId,
+          },
+        });
+      }
+
+      selectedCandidateData = revalidation.candidate!;
+      catalogItem = candidateToCatalogItem(selectedCandidateData);
+
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PRODUCT_REVALIDATED',
+          actor: principalId,
+          resourceId: selectedCandidateData.providerProductId,
+          outcome: 'VALID',
+          metadata: {
+            priceMinor: selectedCandidateData.unitPriceMinor,
+            currency: selectedCandidateData.currency,
+            merchantId: selectedCandidateData.merchantId,
+          },
+        },
+        correlationId,
+      );
+    } else {
+      // 1. Check development catalog for deterministic Phase 3A backward compatibility
+      catalogItem = catalogResolver.resolveLegacyItem(
+        intent.intent.productQuery,
+        intent.intent.merchantPreference,
+      );
+
+      // 2. If not matched in dev catalog, execute discovery search via catalogResolver
+      if (!catalogItem) {
+        const searchResult = await catalogResolver.search(
+          {
+            query: intent.intent.productQuery,
+            merchantPreference: intent.intent.merchantPreference,
+            currency: intent.intent.constraints?.currency,
+          },
+          { timeoutMs: config.PRODUCT_DISCOVERY_TIMEOUT_MS },
+        );
+
+        if (searchResult.status === 'SELECTION_REQUIRED' && searchResult.candidates.length > 1) {
+          await client.recordAuditEvent(
+            {
+              correlationId,
+              eventType: 'INTENT_SELECTION_REQUIRED',
+              actor: principalId,
+              resourceId: requestId,
+              outcome: 'SELECTION_REQUIRED',
+              metadata: {
+                query: intent.intent.productQuery,
+                candidateCount: searchResult.candidates.length,
+              },
+            },
+            correlationId,
+          );
+
+          return reply.status(200).send({
+            outcome: 'SELECTION_REQUIRED',
+            status: 'SELECTION_REQUIRED',
+            reason: `Multiple product candidates matched "${intent.intent.productQuery}". Please select a specific candidate to continue.`,
+            candidates: searchResult.candidates,
+            query: intent.intent.productQuery,
+            correlationId,
+          });
+        }
+
+        if (searchResult.status === 'EXACT_MATCH' && searchResult.candidates.length === 1) {
+          const candidate = searchResult.candidates[0]!;
+          const revalidation = await catalogResolver.revalidateCandidate(
+            candidate.providerProductId,
+            {
+              timeoutMs: config.PRODUCT_DISCOVERY_TIMEOUT_MS,
+            },
+          );
+          if (revalidation.status === 'VALID' && revalidation.candidate) {
+            selectedCandidateData = revalidation.candidate;
+            catalogItem = candidateToCatalogItem(selectedCandidateData);
+          }
+        }
+      }
+    }
 
     if (!catalogItem) {
       await client.recordAuditEvent(
@@ -326,6 +615,7 @@ export function buildApp(
       );
       return reply.status(200).send({
         outcome: 'SELECTION_REQUIRED',
+        status: 'SELECTION_REQUIRED',
         reason: `Product "${intent.intent.productQuery}" could not be resolved from authoritative catalog. Specific product selection is required.`,
         query: intent.intent.productQuery,
         correlationId,
@@ -360,6 +650,7 @@ export function buildApp(
       productQuery: intent.intent.productQuery,
       quantity,
       merchantPreference: intent.intent.merchantPreference,
+      selectedProductId: parseResult.data.selectedCandidate?.providerProductId ?? catalogItem.id,
       constraints: intent.intent.constraints,
     });
 
@@ -469,6 +760,10 @@ export function buildApp(
       metadata: {
         rawIntent,
         policyReasonMessage: decision.reasonMessage,
+        providerId: selectedCandidateData?.providerId,
+        providerProductId: selectedCandidateData?.providerProductId,
+        productUrl: selectedCandidateData?.productUrl,
+        priceProvenance: selectedCandidateData?.priceProvenance,
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

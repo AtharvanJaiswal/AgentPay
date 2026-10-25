@@ -6,3 +6,4 @@ export * from './audit.js';
 export * from './agent.js';
 export * from './purchase-intent.js';
 export * from './catalog.js';
+export * from './product-discovery.js';

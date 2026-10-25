@@ -19,6 +19,8 @@ export const SUPPORTED_CURRENCIES: Record<string, CurrencyMetadata> = {
   JPY: { code: 'JPY', decimals: 0, name: 'Japanese Yen' },
   CAD: { code: 'CAD', decimals: 2, name: 'Canadian Dollar' },
   AUD: { code: 'AUD', decimals: 2, name: 'Australian Dollar' },
+  BHD: { code: 'BHD', decimals: 3, name: 'Bahraini Dinar' },
+  KWD: { code: 'KWD', decimals: 3, name: 'Kuwaiti Dinar' },
 };
 
 export function isSupportedCurrency(code: string): boolean {
@@ -231,6 +233,14 @@ export const CreatePurchaseIntentInputSchema = z
       .trim()
       .min(2, 'locale must be at least 2 characters')
       .max(35, 'locale cannot exceed 35 characters')
+      .optional(),
+    selectedCandidate: z
+      .object({
+        providerProductId: z.string().min(1).max(128),
+        providerId: z.string().min(1).max(64).default('mock-provider'),
+        expectedUnitPriceMinor: z.number().int().nonnegative().optional(),
+        expectedCurrency: z.string().length(3).optional(),
+      })
       .optional(),
   })
   .strict();

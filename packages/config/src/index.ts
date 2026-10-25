@@ -84,6 +84,10 @@ export const ApiGatewayConfigSchema = BaseConfigSchema.extend({
     .union([z.boolean(), z.string()])
     .default('false')
     .transform((val) => val === true || val === 'true' || val === '1'),
+  PRODUCT_DISCOVERY_PROVIDER: z.enum(['mock', 'http']).default('mock'),
+  PRODUCT_DISCOVERY_API_URL: z.string().url().optional(),
+  PRODUCT_DISCOVERY_API_KEY: z.string().optional(),
+  PRODUCT_DISCOVERY_TIMEOUT_MS: z.coerce.number().default(4000),
 }).superRefine((data, ctx) => {
   if (data.NODE_ENV === 'production' && data.ALLOW_DEV_IDENTITY) {
     ctx.addIssue({
@@ -91,6 +95,14 @@ export const ApiGatewayConfigSchema = BaseConfigSchema.extend({
       message:
         'ALLOW_DEV_IDENTITY is strictly forbidden in production. Production authentication cannot use development identity fallbacks.',
       path: ['ALLOW_DEV_IDENTITY'],
+    });
+  }
+
+  if (data.PRODUCT_DISCOVERY_PROVIDER === 'http' && !data.PRODUCT_DISCOVERY_API_URL) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'PRODUCT_DISCOVERY_API_URL is required when PRODUCT_DISCOVERY_PROVIDER is http',
+      path: ['PRODUCT_DISCOVERY_API_URL'],
     });
   }
 });
@@ -193,6 +205,10 @@ export function getApiGatewayConfig(env: NodeJS.ProcessEnv = process.env): ApiGa
     RATE_LIMIT_WINDOW_MS: env['RATE_LIMIT_WINDOW_MS'],
     REQUEST_TIMEOUT_MS: env['REQUEST_TIMEOUT_MS'],
     ALLOW_DEV_IDENTITY: env['ALLOW_DEV_IDENTITY'],
+    PRODUCT_DISCOVERY_PROVIDER: env['PRODUCT_DISCOVERY_PROVIDER'],
+    PRODUCT_DISCOVERY_API_URL: env['PRODUCT_DISCOVERY_API_URL'],
+    PRODUCT_DISCOVERY_API_KEY: env['PRODUCT_DISCOVERY_API_KEY'],
+    PRODUCT_DISCOVERY_TIMEOUT_MS: env['PRODUCT_DISCOVERY_TIMEOUT_MS'],
   });
 }
 

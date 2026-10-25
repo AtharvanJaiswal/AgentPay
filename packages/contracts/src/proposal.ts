@@ -151,6 +151,7 @@ export function computeIntentFingerprint(intent: {
   productQuery: string;
   quantity: number;
   merchantPreference?: string;
+  selectedProductId?: string;
   constraints?: {
     maxUnitPriceMinor?: number;
     maxTotalMinor?: number;
@@ -163,6 +164,7 @@ export function computeIntentFingerprint(intent: {
     productQuery: intent.productQuery.trim().toLowerCase(),
     quantity: intent.quantity,
     merchantPreference: intent.merchantPreference?.trim().toLowerCase() ?? '',
+    selectedProductId: intent.selectedProductId?.trim().toLowerCase() ?? '',
     constraints: {
       maxUnitPriceMinor: intent.constraints?.maxUnitPriceMinor ?? null,
       maxTotalMinor: intent.constraints?.maxTotalMinor ?? null,
