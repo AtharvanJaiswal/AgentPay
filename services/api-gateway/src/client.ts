@@ -9,6 +9,9 @@ import type {
   AuditEvent,
   CreateAuditEventInput,
   ReconciliationResult,
+  PurchaseIntentParseResult,
+  StoredPurchaseProposal,
+  ProposalLifecycleStatus,
 } from '@agentpay/contracts';
 
 export class ServiceClient {
@@ -232,5 +235,160 @@ export class ServiceClient {
     } catch {
       return [];
     }
+  }
+
+  async parseIntent(
+    rawIntent: string,
+    correlationId: string,
+    options?: {
+      requestId?: string;
+      idempotencyKey?: string;
+      principalId?: string;
+      locale?: string;
+    },
+  ): Promise<PurchaseIntentParseResult> {
+    const res = await request(`${this.config.AGENT_SERVICE_URL}/intents/parse`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-correlation-id': correlationId,
+      },
+      body: JSON.stringify({
+        rawIntent,
+        requestId: options?.requestId,
+        idempotencyKey: options?.idempotencyKey,
+        principalId: options?.principalId,
+        locale: options?.locale,
+      }),
+      headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+    });
+
+    const body = (await res.body.json()) as
+      | PurchaseIntentParseResult
+      | { error?: { message?: string; code?: string } };
+
+    if (res.statusCode >= 400 && (body as { error?: { message?: string } })?.error) {
+      const err = new Error(
+        (body as { error?: { message?: string } })?.error?.message ?? 'Intent parsing error',
+      );
+      (err as unknown as { code?: string; statusCode?: number }).code = (
+        body as { error?: { code?: string } }
+      )?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+
+    return body as PurchaseIntentParseResult;
+  }
+
+  async persistProposal(
+    proposal: StoredPurchaseProposal,
+    correlationId: string,
+  ): Promise<StoredPurchaseProposal> {
+    const res = await request(`${this.config.AGENT_SERVICE_URL}/proposals`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-correlation-id': correlationId,
+      },
+      body: JSON.stringify(proposal),
+      headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+    });
+
+    const body = (await res.body.json()) as
+      | StoredPurchaseProposal
+      | { error?: { message?: string; code?: string } };
+
+    if (res.statusCode >= 400) {
+      const err = new Error(
+        (body as { error?: { message?: string } })?.error?.message ??
+          'Failed to persist purchase proposal',
+      );
+      (err as unknown as { code?: string; statusCode?: number }).code = (
+        body as { error?: { code?: string } }
+      )?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+
+    return body as StoredPurchaseProposal;
+  }
+
+  async getProposal(id: string, correlationId: string): Promise<StoredPurchaseProposal | null> {
+    const res = await request(
+      `${this.config.AGENT_SERVICE_URL}/proposals/${encodeURIComponent(id)}`,
+      {
+        method: 'GET',
+        headers: {
+          'x-correlation-id': correlationId,
+        },
+        headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+      },
+    );
+
+    if (res.statusCode === 404) {
+      return null;
+    }
+
+    const body = (await res.body.json()) as
+      | StoredPurchaseProposal
+      | { error?: { message?: string; code?: string } };
+
+    if (res.statusCode >= 400) {
+      const err = new Error(
+        (body as { error?: { message?: string } })?.error?.message ??
+          'Failed to retrieve purchase proposal',
+      );
+      (err as unknown as { code?: string; statusCode?: number }).code = (
+        body as { error?: { code?: string } }
+      )?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+
+    return body as StoredPurchaseProposal;
+  }
+
+  async updateProposalStatus(
+    id: string,
+    status: ProposalLifecycleStatus,
+    correlationId: string,
+    updates?: {
+      policyDecisionId?: string;
+      policyOutcome?: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+      policyReasonCode?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<StoredPurchaseProposal> {
+    const res = await request(
+      `${this.config.AGENT_SERVICE_URL}/proposals/${encodeURIComponent(id)}/status`,
+      {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'x-correlation-id': correlationId,
+        },
+        body: JSON.stringify({ status, ...updates }),
+        headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+      },
+    );
+
+    const body = (await res.body.json()) as
+      | StoredPurchaseProposal
+      | { error?: { message?: string; code?: string } };
+
+    if (res.statusCode >= 400) {
+      const err = new Error(
+        (body as { error?: { message?: string } })?.error?.message ??
+          'Failed to update purchase proposal status',
+      );
+      (err as unknown as { code?: string; statusCode?: number }).code = (
+        body as { error?: { code?: string } }
+      )?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+
+    return body as StoredPurchaseProposal;
   }
 }

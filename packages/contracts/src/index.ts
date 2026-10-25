@@ -4,3 +4,5 @@ export * from './policy.js';
 export * from './payment.js';
 export * from './audit.js';
 export * from './agent.js';
+export * from './purchase-intent.js';
+export * from './catalog.js';

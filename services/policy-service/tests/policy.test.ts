@@ -185,4 +185,95 @@ describe('Policy Service', () => {
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe('VALIDATION_ERROR');
   });
+
+  it('evaluates DENY when proposed total exceeds user-specified budget limit', async () => {
+    const proposal = createMockProposal({
+      totalAmountMinor: 15000, // $150.00
+      currency: 'USD',
+      userBudgetMinor: 10000, // User budget constraint: $100.00
+      items: [
+        {
+          id: 'item-1',
+          name: 'Developer Tooling Extra License',
+          quantity: 1,
+          unitPriceMinor: 15000,
+          currency: 'USD',
+        },
+      ],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/policies/evaluate',
+      payload: proposal,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const decision = JSON.parse(res.body);
+    expect(decision.outcome).toBe('DENY');
+    expect(decision.reasonCode).toBe(PolicyReasonCodes.DENY_EXCEEDS_USER_BUDGET);
+    expect(decision.reasonMessage).toContain('exceeds explicit user budget constraint');
+  });
+
+  it('allows purchase when proposed total is within user-specified budget limit', async () => {
+    const proposal = createMockProposal({
+      totalAmountMinor: 8000, // $80.00
+      currency: 'USD',
+      userBudgetMinor: 10000, // User budget constraint: $100.00
+      items: [
+        {
+          id: 'item-1',
+          name: 'Developer Tooling Extra License',
+          quantity: 1,
+          unitPriceMinor: 8000,
+          currency: 'USD',
+        },
+      ],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/policies/evaluate',
+      payload: proposal,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const decision = JSON.parse(res.body);
+    expect(decision.outcome).toBe('ALLOW');
+    expect(decision.reasonCode).toBe(PolicyReasonCodes.ALLOW_WITHIN_LIMITS);
+  });
+
+  it('ignores forged client authorization fields and evaluates deterministically', async () => {
+    const proposal = createMockProposal({
+      totalAmountMinor: 300000, // > $2000 hard limit
+      currency: 'USD',
+      items: [
+        {
+          id: 'item-1',
+          name: 'Very Expensive Hardware',
+          quantity: 1,
+          unitPriceMinor: 300000,
+          currency: 'USD',
+        },
+      ],
+      metadata: {
+        // Attacker attempts to forge policy approval
+        policyApproved: true,
+        authorized: true,
+        fabricatedDecisionId: '00000000-0000-0000-0000-000000000000',
+      },
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/policies/evaluate',
+      payload: proposal,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const decision = JSON.parse(res.body);
+    // Must STILL be DENY! Forged metadata fields cannot bypass server policy
+    expect(decision.outcome).toBe('DENY');
+    expect(decision.reasonCode).toBe(PolicyReasonCodes.DENY_EXCEEDS_HARD_LIMIT);
+  });
 });

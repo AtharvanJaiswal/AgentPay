@@ -50,4 +50,29 @@ describe('Database Migrations Verification', () => {
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS reconciliation_status VARCHAR(32)');
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS idx_payment_orders_reconciliation');
   });
+
+  it('004_create_purchase_proposals.sql defines purchase_proposals table with idempotency scope constraint and indexes', () => {
+    const sql = fs.readFileSync(
+      path.join(migrationsDir, '004_create_purchase_proposals.sql'),
+      'utf-8',
+    );
+
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS purchase_proposals');
+    expect(sql).toContain('id UUID PRIMARY KEY');
+    expect(sql).toContain('request_id VARCHAR(128) NOT NULL');
+    expect(sql).toContain('idempotency_key VARCHAR(128) NOT NULL');
+    expect(sql).toContain('idempotency_scope VARCHAR(128) NOT NULL');
+    expect(sql).toContain('request_hash VARCHAR(64) NOT NULL');
+    expect(sql).toContain('status VARCHAR(32) NOT NULL');
+    expect(sql).toContain('product_query TEXT NOT NULL');
+    expect(sql).toContain('quantity INT NOT NULL');
+    expect(sql).toContain('currency VARCHAR(3) NOT NULL');
+    expect(sql).toContain('total_amount_minor BIGINT');
+    expect(sql).toContain(
+      'CONSTRAINT uq_purchase_proposals_idempotency_scope UNIQUE (idempotency_scope, idempotency_key)',
+    );
+    expect(sql).toContain('idx_purchase_proposals_status');
+    expect(sql).toContain('idx_purchase_proposals_principal');
+    expect(sql).toContain('idx_purchase_proposals_correlation_id');
+  });
 });

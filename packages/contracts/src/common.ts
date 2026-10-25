@@ -63,5 +63,35 @@ export const ErrorCodes = {
   SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
   TIMEOUT: 'TIMEOUT',
   RATE_LIMITED: 'RATE_LIMITED',
+  INVALID_STATE_TRANSITION: 'INVALID_STATE_TRANSITION',
 } as const;
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+
+/**
+ * Safe integer arithmetic helpers for integer minor-unit financial calculations.
+ * Strictly prevents numeric precision loss and integer overflow beyond Number.MAX_SAFE_INTEGER.
+ */
+export function safeIntegerMultiply(a: number, b: number): number {
+  if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) {
+    throw new Error('Operands must be safe integers');
+  }
+  const result = a * b;
+  if (!Number.isSafeInteger(result)) {
+    throw new Error(`Integer multiplication overflow: ${a} * ${b} exceeds safe integer bounds`);
+  }
+  return result;
+}
+
+export function safeIntegerAdd(...numbers: number[]): number {
+  let sum = 0;
+  for (const n of numbers) {
+    if (!Number.isSafeInteger(n)) {
+      throw new Error(`Operand must be a safe integer: ${n}`);
+    }
+    sum += n;
+    if (!Number.isSafeInteger(sum)) {
+      throw new Error('Integer addition overflow: sum exceeds safe integer bounds');
+    }
+  }
+  return sum;
+}

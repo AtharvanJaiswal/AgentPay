@@ -80,6 +80,19 @@ export const ApiGatewayConfigSchema = BaseConfigSchema.extend({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   REQUEST_TIMEOUT_MS: z.coerce.number().default(10000),
+  ALLOW_DEV_IDENTITY: z
+    .union([z.boolean(), z.string()])
+    .default('false')
+    .transform((val) => val === true || val === 'true' || val === '1'),
+}).superRefine((data, ctx) => {
+  if (data.NODE_ENV === 'production' && data.ALLOW_DEV_IDENTITY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        'ALLOW_DEV_IDENTITY is strictly forbidden in production. Production authentication cannot use development identity fallbacks.',
+      path: ['ALLOW_DEV_IDENTITY'],
+    });
+  }
 });
 export type ApiGatewayConfig = z.infer<typeof ApiGatewayConfigSchema>;
 
@@ -179,6 +192,7 @@ export function getApiGatewayConfig(env: NodeJS.ProcessEnv = process.env): ApiGa
     RATE_LIMIT_MAX: env['RATE_LIMIT_MAX'],
     RATE_LIMIT_WINDOW_MS: env['RATE_LIMIT_WINDOW_MS'],
     REQUEST_TIMEOUT_MS: env['REQUEST_TIMEOUT_MS'],
+    ALLOW_DEV_IDENTITY: env['ALLOW_DEV_IDENTITY'],
   });
 }
 

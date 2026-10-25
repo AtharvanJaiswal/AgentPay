@@ -121,6 +121,32 @@ export class DeterministicPolicyEvaluator implements PolicyEvaluator {
       };
     }
 
+    // Rule 4b: User-Configured Budget Constraint Check
+    if (proposal.userBudgetMinor !== undefined) {
+      const exceedsUserBudget = proposal.totalAmountMinor > proposal.userBudgetMinor;
+      rulesEvaluated.push({
+        ruleId: 'RULE_USER_BUDGET_LIMIT',
+        ruleName: 'User Maximum Budget Constraint',
+        passed: !exceedsUserBudget,
+        details: exceedsUserBudget
+          ? `Total (${proposal.totalAmountMinor}) exceeds user-specified budget constraint (${proposal.userBudgetMinor})`
+          : `Total (${proposal.totalAmountMinor}) is within user-specified budget constraint (${proposal.userBudgetMinor})`,
+      });
+
+      if (exceedsUserBudget) {
+        return {
+          decisionId: uuidv4(),
+          proposalId: proposal.id,
+          outcome: 'DENY',
+          reasonCode: PolicyReasonCodes.DENY_EXCEEDS_USER_BUDGET,
+          reasonMessage: `Transaction amount exceeds explicit user budget constraint of ${proposal.userBudgetMinor} minor units`,
+          policyVersion: this.policyVersion,
+          decisionTimestamp: new Date().toISOString(),
+          rulesEvaluated,
+        };
+      }
+    }
+
     // Rule 5: Explicit Approval Requirement for High-Value Purchases
     const requiresExplicitApproval =
       proposal.totalAmountMinor > this.config.APPROVAL_THRESHOLD_MINOR;

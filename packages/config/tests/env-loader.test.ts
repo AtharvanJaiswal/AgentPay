@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { findRepositoryRoot, loadRootEnv, getPaymentServiceConfig } from '../src/index.js';
+import {
+  findRepositoryRoot,
+  loadRootEnv,
+  getPaymentServiceConfig,
+  getApiGatewayConfig,
+} from '../src/index.js';
 
 describe('Repository Root Discovery & Environment Loader', () => {
   const currentFileDir = dirname(fileURLToPath(import.meta.url));
@@ -123,6 +128,32 @@ describe('Repository Root Discovery & Environment Loader', () => {
       expect(config.PAYPAL_API_BASE_URL).toBe('https://api-m.sandbox.paypal.com');
       expect(config.PAYMENTS_ENABLED).toBe(false);
       expect(config.APP_BASE_URL).toBe('http://localhost:3000');
+    });
+  });
+
+  describe('API Gateway Configuration & Identity Mode Invariants', () => {
+    it('defaults ALLOW_DEV_IDENTITY to false', () => {
+      const config = getApiGatewayConfig({
+        NODE_ENV: 'development',
+      });
+      expect(config.ALLOW_DEV_IDENTITY).toBe(false);
+    });
+
+    it('allows ALLOW_DEV_IDENTITY=true only in development or test', () => {
+      const config = getApiGatewayConfig({
+        NODE_ENV: 'development',
+        ALLOW_DEV_IDENTITY: 'true',
+      });
+      expect(config.ALLOW_DEV_IDENTITY).toBe(true);
+    });
+
+    it('strictly forbids ALLOW_DEV_IDENTITY=true in production', () => {
+      expect(() =>
+        getApiGatewayConfig({
+          NODE_ENV: 'production',
+          ALLOW_DEV_IDENTITY: 'true',
+        }),
+      ).toThrowError(/ALLOW_DEV_IDENTITY is strictly forbidden in production/);
     });
   });
 });

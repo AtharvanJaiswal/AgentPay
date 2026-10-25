@@ -4,17 +4,43 @@ import rateLimit from '@fastify/rate-limit';
 import { v4 as uuidv4 } from 'uuid';
 import {
   CreateProposalInputSchema,
+  CreatePurchaseIntentInputSchema,
   PurchaseProposalSchema,
+  resolveCatalogItem,
+  computeIntentFingerprint,
+  safeIntegerMultiply,
+  safeIntegerAdd,
   ErrorCodes,
   type ApiHealthResponse,
+  type StoredPurchaseProposal,
+  type PurchaseProposal,
+  type PurchaseIntentParseResult,
+  type PolicyDecision,
 } from '@agentpay/contracts';
 import { createLogger, getChildLogger } from '@agentpay/logger';
-import { getApiGatewayConfig } from '@agentpay/config';
+import { getApiGatewayConfig, type ApiGatewayConfig } from '@agentpay/config';
 import { ServiceClient } from './client.js';
+import {
+  type AuthenticationProvider,
+  DevelopmentAuthenticationProvider,
+  ProductionPendingAuthenticationProvider,
+  TestAuthenticationProvider,
+} from './auth.js';
 
-export function buildApp(clientOverride?: ServiceClient) {
-  const config = getApiGatewayConfig();
+export function buildApp(
+  clientOverride?: ServiceClient,
+  configOverride?: ApiGatewayConfig,
+  authProviderOverride?: AuthenticationProvider,
+) {
+  const config = configOverride ?? getApiGatewayConfig();
   const client = clientOverride ?? new ServiceClient(config);
+  const authProvider =
+    authProviderOverride ??
+    (config.NODE_ENV === 'test'
+      ? new TestAuthenticationProvider()
+      : config.ALLOW_DEV_IDENTITY && config.NODE_ENV !== 'production'
+        ? new DevelopmentAuthenticationProvider(config)
+        : new ProductionPendingAuthenticationProvider());
   const startTime = Date.now();
   const logger = createLogger({ serviceName: 'api-gateway', level: config.LOG_LEVEL });
 
@@ -135,7 +161,429 @@ export function buildApp(clientOverride?: ServiceClient) {
     });
   });
 
-  // Create Proposal via Agent Service
+  // Orchestrated Purchase Intent Workflow:
+  // User request -> Gateway validation -> Agent intent parsing -> (Clarification / Unsupported)
+  // -> Authoritative Catalog Resolution -> Policy Service Evaluation -> (Deny / Review)
+  // -> Durable Proposal Creation with PostgreSQL Idempotency Scope -> Audit Trail
+  app.post('/api/purchase-intents', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+
+    // 1. Gateway Input Validation
+    const parseResult = CreatePurchaseIntentInputSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      reqLogger.warn(
+        { issues: parseResult.error.issues },
+        'Invalid purchase intent input received',
+      );
+      return reply.status(400).send({
+        error: {
+          code: ErrorCodes.VALIDATION_ERROR,
+          message: 'Invalid purchase intent input payload',
+          correlationId,
+          details: parseResult.error.issues,
+        },
+      });
+    }
+
+    const { rawIntent } = parseResult.data;
+    // 2. Caller Authentication & Scope
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      reqLogger.warn('Unauthenticated request to /api/purchase-intents rejected');
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to create purchase proposals.',
+          correlationId,
+        },
+      });
+    }
+
+    const principalId = principal.id;
+    const requestId = parseResult.data.requestId || uuidv4();
+    const idempotencyKey =
+      parseResult.data.idempotencyKey ||
+      (req.headers['idempotency-key'] as string) ||
+      `intent-${uuidv4()}`;
+    const idempotencyScope = `principal:${principalId}`;
+
+    reqLogger.info(
+      {
+        principalId,
+        authSource: principal.authSource,
+        requestId,
+        idempotencyKey,
+        idempotencyScope,
+      },
+      'Processing purchase intent workflow',
+    );
+
+    // Audit initial intent receipt
+    await client.recordAuditEvent(
+      {
+        correlationId,
+        eventType: 'INTENT_RECEIVED',
+        actor: principalId,
+        resourceId: requestId,
+        outcome: 'RECEIVED',
+        metadata: { rawIntent: rawIntent.slice(0, 200), idempotencyKey, idempotencyScope },
+      },
+      correlationId,
+    );
+
+    // 3. Agent Intent Parsing & Ambiguity Detection
+    let parsedResult: PurchaseIntentParseResult;
+    try {
+      parsedResult = await client.parseIntent(rawIntent, correlationId, {
+        requestId,
+        idempotencyKey,
+        principalId,
+        locale: parseResult.data.locale,
+      });
+    } catch (err: unknown) {
+      reqLogger.error({ err }, 'Agent intent parsing failed');
+      return reply.status(502).send({
+        error: {
+          code: ErrorCodes.SERVICE_UNAVAILABLE,
+          message: 'Agent service intent parsing unavailable',
+          correlationId,
+        },
+      });
+    }
+
+    if (parsedResult.status === 'UNSUPPORTED_INTENT') {
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'INTENT_UNSUPPORTED',
+          actor: principalId,
+          resourceId: requestId,
+          outcome: 'UNSUPPORTED',
+          metadata: { reason: parsedResult.reason },
+        },
+        correlationId,
+      );
+      return reply.status(200).send({
+        outcome: 'UNSUPPORTED_INTENT',
+        reason: parsedResult.reason,
+        correlationId,
+      });
+    }
+
+    if (parsedResult.status === 'NEEDS_CLARIFICATION') {
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'INTENT_CLARIFICATION_REQUIRED',
+          actor: principalId,
+          resourceId: requestId,
+          outcome: 'CLARIFICATION_REQUIRED',
+          metadata: { reason: parsedResult.reason, question: parsedResult.question },
+        },
+        correlationId,
+      );
+      return reply.status(200).send({
+        outcome: 'CLARIFICATION_REQUIRED',
+        reason: parsedResult.reason,
+        question: parsedResult.question,
+        rawInput: parsedResult.rawInput,
+        correlationId,
+      });
+    }
+
+    if (parsedResult.status === 'INVALID_INPUT') {
+      return reply.status(400).send({
+        error: {
+          code: ErrorCodes.VALIDATION_ERROR,
+          message: parsedResult.reason,
+          correlationId,
+          details: parsedResult.validationErrors,
+        },
+      });
+    }
+
+    const intent = parsedResult.intent;
+
+    // 4. Authoritative Product Catalog Resolution
+    const catalogItem = resolveCatalogItem(
+      intent.intent.productQuery,
+      intent.intent.merchantPreference,
+    );
+
+    if (!catalogItem) {
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'INTENT_SELECTION_REQUIRED',
+          actor: principalId,
+          resourceId: requestId,
+          outcome: 'SELECTION_REQUIRED',
+          metadata: { query: intent.intent.productQuery },
+        },
+        correlationId,
+      );
+      return reply.status(200).send({
+        outcome: 'SELECTION_REQUIRED',
+        reason: `Product "${intent.intent.productQuery}" could not be resolved from authoritative catalog. Specific product selection is required.`,
+        query: intent.intent.productQuery,
+        correlationId,
+      });
+    }
+
+    // 5. Monetary Calculation with Checked Safe Integer Minor Units
+    const quantity = intent.intent.quantity;
+    const unitPriceMinor = catalogItem.unitPriceMinor;
+    const taxMinor = 0;
+    const shippingMinor = 0;
+    let subtotalMinor: number;
+    let totalAmountMinor: number;
+    try {
+      subtotalMinor = safeIntegerMultiply(unitPriceMinor, quantity);
+      totalAmountMinor = safeIntegerAdd(subtotalMinor, taxMinor, shippingMinor);
+    } catch (err: unknown) {
+      reqLogger.error({ err }, 'Integer minor unit calculation overflow');
+      return reply.status(400).send({
+        error: {
+          code: ErrorCodes.VALIDATION_ERROR,
+          message: err instanceof Error ? err.message : 'Monetary arithmetic error',
+          correlationId,
+        },
+      });
+    }
+    const currency = catalogItem.currency;
+
+    // Fingerprint canonical intent for database-backed idempotency
+    const requestHash = computeIntentFingerprint({
+      action: intent.intent.action,
+      productQuery: intent.intent.productQuery,
+      quantity,
+      merchantPreference: intent.intent.merchantPreference,
+      constraints: intent.intent.constraints,
+    });
+
+    const proposalId = uuidv4();
+
+    // Build PurchaseProposal structure for authoritative Policy Service evaluation
+    const proposalForPolicy: PurchaseProposal = {
+      id: proposalId,
+      intentId: intent.requestId,
+      agentId: 'agent-assistant-01',
+      merchant: {
+        id: catalogItem.merchantId,
+        name: catalogItem.merchantName,
+        category: catalogItem.category,
+      },
+      items: [
+        {
+          id: catalogItem.id,
+          name: catalogItem.name,
+          quantity,
+          unitPriceMinor,
+          currency,
+        },
+      ],
+      totalAmountMinor,
+      currency,
+      purpose: `Purchase intent: ${intent.intent.productQuery}`,
+      userBudgetMinor: intent.intent.constraints?.maxTotalMinor,
+      metadata: {
+        principalId,
+        idempotencyKey,
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    // 6. Server-Side Policy Evaluation (Policy Service is authoritative; never bypassed)
+    let decision: PolicyDecision;
+    try {
+      decision = await client.evaluatePolicy(proposalForPolicy, correlationId);
+    } catch (err: unknown) {
+      reqLogger.error({ err }, 'Policy evaluation downstream failed');
+      return reply.status(502).send({
+        error: {
+          code: ErrorCodes.SERVICE_UNAVAILABLE,
+          message: 'Policy evaluation service unavailable',
+          correlationId,
+        },
+      });
+    }
+
+    // 7. Branch on Policy Decision
+    if (decision.outcome === 'DENY') {
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PROPOSAL_POLICY_DENIED',
+          actor: 'policy-service',
+          resourceId: decision.decisionId,
+          outcome: 'DENY',
+          reasonCode: decision.reasonCode,
+          metadata: {
+            proposalId,
+            reasonMessage: decision.reasonMessage,
+            totalAmountMinor,
+            merchantCategory: catalogItem.category,
+          },
+        },
+        correlationId,
+      );
+
+      return reply.status(403).send({
+        outcome: 'POLICY_DENIED',
+        policyDecision: decision,
+        message: `Purchase intent denied by policy: ${decision.reasonMessage}`,
+        correlationId,
+      });
+    }
+
+    const proposalStatus =
+      decision.outcome === 'ALLOW' ? 'READY_FOR_REVIEW' : 'POLICY_REVIEW_REQUIRED';
+
+    const storedProposalInput: StoredPurchaseProposal = {
+      id: proposalId,
+      requestId,
+      idempotencyKey,
+      idempotencyScope,
+      requestHash,
+      status: proposalStatus,
+      productQuery: intent.intent.productQuery,
+      productId: catalogItem.id,
+      productName: catalogItem.name,
+      merchantId: catalogItem.merchantId,
+      merchantName: catalogItem.merchantName,
+      merchantCategory: catalogItem.category,
+      quantity,
+      currency,
+      unitPriceMinor,
+      subtotalMinor,
+      taxMinor,
+      shippingMinor,
+      totalAmountMinor,
+      policyDecisionId: decision.decisionId,
+      policyOutcome: decision.outcome,
+      policyReasonCode: decision.reasonCode,
+      principalId,
+      correlationId,
+      metadata: {
+        rawIntent,
+        policyReasonMessage: decision.reasonMessage,
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // 8. Durable Proposal Creation (Database-Enforced Idempotency)
+    let storedProposal: StoredPurchaseProposal;
+    try {
+      storedProposal = await client.persistProposal(storedProposalInput, correlationId);
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; statusCode?: number; message?: string };
+      if (errorObj.statusCode === 409 || errorObj.code === 'IDEMPOTENCY_CONFLICT') {
+        reqLogger.warn('Idempotency conflict during proposal persistence');
+        return reply.status(409).send({
+          error: {
+            code: 'IDEMPOTENCY_CONFLICT',
+            message:
+              errorObj.message ||
+              'Idempotency key was already used with a different intent payload',
+            correlationId,
+          },
+        });
+      }
+      reqLogger.error({ err }, 'Failed to persist durable proposal');
+      return reply.status(502).send({
+        error: {
+          code: ErrorCodes.SERVICE_UNAVAILABLE,
+          message: 'Failed to persist purchase proposal',
+          correlationId,
+        },
+      });
+    }
+
+    // 9. Audit Event Recording
+    const auditEventType =
+      decision.outcome === 'ALLOW' ? 'PROPOSAL_READY_FOR_REVIEW' : 'PROPOSAL_REVIEW_REQUIRED';
+
+    await client.recordAuditEvent(
+      {
+        correlationId,
+        eventType: auditEventType,
+        actor: 'api-gateway',
+        resourceId: storedProposal.id,
+        outcome: storedProposal.status,
+        reasonCode: decision.reasonCode,
+        metadata: {
+          totalAmountMinor,
+          currency,
+          merchantName: catalogItem.merchantName,
+          policyDecisionId: decision.decisionId,
+        },
+      },
+      correlationId,
+    );
+
+    const outcome = decision.outcome === 'ALLOW' ? 'PROPOSAL_CREATED' : 'POLICY_REVIEW_REQUIRED';
+    const httpStatus = decision.outcome === 'ALLOW' ? 201 : 200;
+
+    return reply.status(httpStatus).send({
+      outcome,
+      proposal: storedProposal,
+      policyDecision: decision,
+      message:
+        decision.outcome === 'ALLOW'
+          ? 'Purchase proposal created and ready for user review'
+          : `Purchase proposal created but requires explicit human authorization (${decision.reasonMessage})`,
+      correlationId,
+    });
+  });
+
+  // Get Proposal by ID (with principal authorization check)
+  app.get('/api/purchase-intents/:id', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const { id } = req.params as { id: string };
+
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to access purchase proposals.',
+          correlationId,
+        },
+      });
+    }
+
+    const principalId = principal.id;
+
+    const proposal = await client.getProposal(id, correlationId);
+    if (!proposal) {
+      return reply.status(404).send({
+        error: {
+          code: ErrorCodes.NOT_FOUND,
+          message: `Purchase proposal ${id} not found`,
+          correlationId,
+        },
+      });
+    }
+
+    // Verify principal ownership if principal is defined on proposal
+    if (proposal.principalId && proposal.principalId !== principalId) {
+      return reply.status(403).send({
+        error: {
+          code: ErrorCodes.FORBIDDEN,
+          message: 'Access to purchase proposal denied for principal',
+          correlationId,
+        },
+      });
+    }
+
+    return reply.status(200).send(proposal);
+  });
+
+  // Create Proposal via Agent Service (Legacy / direct agent endpoint)
   app.post('/api/proposals', async (req, reply) => {
     const correlationId = req.headers['x-correlation-id'] as string;
     const reqLogger = getChildLogger(logger, correlationId);
