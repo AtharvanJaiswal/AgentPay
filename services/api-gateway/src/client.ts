@@ -8,6 +8,7 @@ import type {
   PaymentCaptureResult,
   AuditEvent,
   CreateAuditEventInput,
+  ReconciliationResult,
 } from '@agentpay/contracts';
 
 export class ServiceClient {
@@ -154,6 +155,39 @@ export class ServiceClient {
       throw err;
     }
     return body as unknown as PaymentCaptureResult;
+  }
+
+  async reconcilePaymentOrder(
+    orderId: string,
+    correlationId: string,
+  ): Promise<ReconciliationResult> {
+    const res = await request(
+      `${this.config.PAYMENT_SERVICE_URL}/orders/${encodeURIComponent(orderId)}/reconcile`,
+      {
+        method: 'POST',
+        headers: {
+          'x-correlation-id': correlationId,
+        },
+        headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+      },
+    );
+
+    const body = (await res.body.json()) as
+      | ReconciliationResult
+      | { error?: { code?: string; message?: string } };
+
+    if (res.statusCode !== 200) {
+      const err = new Error(
+        (body as { error?: { message?: string } })?.error?.message ??
+          'Payment reconciliation error',
+      );
+      (err as unknown as { code?: string; statusCode?: number }).code = (
+        body as { error?: { code?: string } }
+      )?.error?.code;
+      (err as unknown as { code?: string; statusCode?: number }).statusCode = res.statusCode;
+      throw err;
+    }
+    return body as ReconciliationResult;
   }
 
   async recordAuditEvent(

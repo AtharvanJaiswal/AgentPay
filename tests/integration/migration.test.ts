@@ -38,4 +38,16 @@ describe('Database Migrations Verification', () => {
     expect(sql).toContain('idx_payment_orders_status');
     expect(sql).toContain('idx_webhook_events_resource_id');
   });
+
+  it('003_add_reconciliation_columns.sql defines last_reconciled_at and reconciliation_status columns', () => {
+    const sql = fs.readFileSync(
+      path.join(migrationsDir, '003_add_reconciliation_columns.sql'),
+      'utf-8',
+    );
+
+    expect(sql).toContain('ALTER TABLE payment_orders');
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ');
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS reconciliation_status VARCHAR(32)');
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS idx_payment_orders_reconciliation');
+  });
 });

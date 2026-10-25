@@ -30,8 +30,32 @@ export const PaymentOrderSchema = z.object({
   createdAt: z.string().datetime(),
   environmentNote: z.string(),
   idempotencyKey: z.string().optional(),
+  lastReconciledAt: z.string().datetime().optional(),
+  reconciliationStatus: z.string().optional(),
 });
 export type PaymentOrder = z.infer<typeof PaymentOrderSchema>;
+
+export const ReconciliationStatusSchema = z.enum([
+  'UNCHANGED',
+  'UPDATED',
+  'DUPLICATE',
+  'CONFLICT',
+  'NOT_FOUND',
+  'RETRYABLE_ERROR',
+  'REQUIRES_REVIEW',
+]);
+export type ReconciliationStatus = z.infer<typeof ReconciliationStatusSchema>;
+
+export const ReconciliationResultSchema = z.object({
+  orderId: z.string(),
+  status: ReconciliationStatusSchema,
+  previousOrderStatus: PaymentOrderStatusSchema.optional(),
+  currentOrderStatus: PaymentOrderStatusSchema.optional(),
+  providerStatus: z.string().optional(),
+  details: z.string().optional(),
+  timestamp: z.string().datetime(),
+});
+export type ReconciliationResult = z.infer<typeof ReconciliationResultSchema>;
 
 export const PaymentCaptureStatusSchema = z.enum([
   'COMPLETED',
@@ -94,4 +118,5 @@ export interface PaymentProvider {
     options?: CaptureOrderOptions,
   ): Promise<PaymentCaptureResult>;
   verifyWebhook(payload: unknown, headers: Record<string, string>): Promise<boolean>;
+  reconcileOrder?(orderId: string, correlationId: string): Promise<ReconciliationResult>;
 }

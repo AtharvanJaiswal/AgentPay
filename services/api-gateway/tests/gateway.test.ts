@@ -301,5 +301,40 @@ describe('API Gateway', () => {
       expect(body.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
       expect(mockCapturePaymentOrder).toHaveBeenCalledTimes(0);
     });
+
+    it('POST /api/payments/orders/:id/reconcile forwards reconciliation to downstream payment service', async () => {
+      const mockReconcileResult = {
+        orderId: 'ORDER-RECON-GW',
+        status: 'UPDATED' as const,
+        previousOrderStatus: 'CREATED' as const,
+        currentOrderStatus: 'APPROVED' as const,
+        providerStatus: 'APPROVED',
+        details: 'Reconciled from PayPal',
+        timestamp: new Date().toISOString(),
+      };
+
+      const mockReconcilePaymentOrder = vi.fn().mockResolvedValue(mockReconcileResult);
+      const mockClient = {
+        reconcilePaymentOrder: mockReconcilePaymentOrder,
+      } as unknown as ServiceClient;
+
+      const app = buildApp(mockClient);
+      const correlationId = 'test-corr-recon-gw';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/payments/orders/ORDER-RECON-GW/reconcile',
+        headers: {
+          'x-correlation-id': correlationId,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.orderId).toBe('ORDER-RECON-GW');
+      expect(body.status).toBe('UPDATED');
+      expect(body.currentOrderStatus).toBe('APPROVED');
+      expect(mockReconcilePaymentOrder).toHaveBeenCalledWith('ORDER-RECON-GW', correlationId);
+    });
   });
 });

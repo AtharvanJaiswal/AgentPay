@@ -422,6 +422,36 @@ export function buildApp(clientOverride?: ServiceClient) {
     }
   });
 
+  // Reconcile Payment Order State
+  app.post('/api/payments/orders/:id/reconcile', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+    const { id } = req.params as { id: string };
+
+    try {
+      const result = await client.reconcilePaymentOrder(id, correlationId);
+      reqLogger.info(
+        {
+          orderId: id,
+          status: result.status,
+          currentOrderStatus: result.currentOrderStatus,
+        },
+        'Payment order reconciliation completed via gateway',
+      );
+      return reply.status(200).send(result);
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; statusCode?: number; message?: string };
+      reqLogger.error({ err }, 'Order reconciliation failed');
+      return reply.status(errorObj.statusCode ?? 500).send({
+        error: {
+          code: errorObj.code ?? ErrorCodes.INTERNAL_ERROR,
+          message: errorObj.message ?? 'Failed to reconcile payment order',
+          correlationId,
+        },
+      });
+    }
+  });
+
   // List Recent Audit Events
   app.get('/api/audit-events', async (req, reply) => {
     const query = req.query as { limit?: string; correlationId?: string };

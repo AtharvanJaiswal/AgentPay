@@ -70,7 +70,7 @@ export function buildApp(
       repository,
     });
   } else {
-    provider = new MockPaymentProvider();
+    provider = new MockPaymentProvider(repository);
   }
 
   const startTime = Date.now();
@@ -412,6 +412,46 @@ export function buildApp(
         error: {
           code: isPolicyViolation ? ErrorCodes.POLICY_VIOLATION : ErrorCodes.BAD_REQUEST,
           message: errorMessage,
+          correlationId,
+        },
+      });
+    }
+  });
+
+  // Reconcile order state with authoritative provider state
+  app.post('/orders/:id/reconcile', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+    const { id } = req.params as { id: string };
+
+    if (!provider.reconcileOrder) {
+      return reply.status(501).send({
+        error: {
+          code: 'NOT_IMPLEMENTED',
+          message: 'Provider does not support reconciliation',
+          correlationId,
+        },
+      });
+    }
+
+    try {
+      const result = await provider.reconcileOrder(id, correlationId);
+      reqLogger.info(
+        {
+          orderId: id,
+          status: result.status,
+          currentOrderStatus: result.currentOrderStatus,
+          providerStatus: result.providerStatus,
+        },
+        'Order state reconciliation completed',
+      );
+      return reply.status(200).send(result);
+    } catch (err: unknown) {
+      reqLogger.error({ err }, 'Order reconciliation failed');
+      return reply.status(500).send({
+        error: {
+          code: ErrorCodes.INTERNAL_ERROR,
+          message: err instanceof Error ? err.message : 'Failed to reconcile payment order',
           correlationId,
         },
       });

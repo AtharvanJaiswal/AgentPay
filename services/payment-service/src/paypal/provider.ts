@@ -6,11 +6,13 @@ import type {
   CreateOrderOptions,
   CaptureOrderOptions,
   PaymentOrderStatus,
+  ReconciliationResult,
 } from '@agentpay/contracts';
 import { PayPalOAuthClient, type PayPalOAuthVerificationResult } from './oauth-client.js';
 import {
   PayPalOrdersClient,
   PayPalCaptureTimeoutError,
+  PayPalOrderApiError,
   validateProposalAmountsAndCurrency,
 } from './orders-client.js';
 import {
@@ -19,6 +21,7 @@ import {
   computeProposalHash,
   type StoredPaymentOrder,
   IdempotencyConflictError,
+  canTransitionStatus,
 } from '../repository.js';
 
 export interface PayPalPaymentProviderOptions {
@@ -310,6 +313,7 @@ export class PayPalPaymentProvider implements PaymentProvider {
 
   /**
    * Verify Webhook Signature and process order lifecycle transitions monotonically.
+   * Deduplicates using stable PayPal event ID and ensures monotonic, race-safe transitions.
    */
   async verifyWebhook(payload: unknown, headers: Record<string, string>): Promise<boolean> {
     const authAlgo = headers['paypal-auth-algo'];
@@ -339,39 +343,274 @@ export class PayPalPaymentProvider implements PaymentProvider {
       return false;
     }
 
-    // Deduplicate webhook event transmission ID
-    const eventObj = payload as { id?: string; event_type?: string; resource?: { id?: string } };
+    // Deduplicate and process webhook event atomically
+    const eventObj = payload as {
+      id?: string;
+      event_type?: string;
+      resource_type?: string;
+      resource?: {
+        id?: string;
+        amount?: { value?: string; currency_code?: string };
+        supplementary_data?: {
+          related_ids?: {
+            order_id?: string;
+            capture_id?: string;
+          };
+        };
+        custom_id?: string;
+      };
+    };
+    const eventId = eventObj?.id || transmissionId;
     const eventType = eventObj?.event_type ?? 'UNKNOWN';
-    const resourceId = eventObj?.resource?.id ?? 'UNKNOWN';
 
-    const { recorded } = await this.repository.recordWebhookEvent({
-      id: transmissionId,
-      eventType,
-      resourceId,
-      processedAt: new Date().toISOString(),
-      payload: (payload as Record<string, unknown>) || {},
+    // In PayPal webhooks, resource.id can be order ID (for CHECKOUT.ORDER.*)
+    // or capture ID (for PAYMENT.CAPTURE.* with related order_id in supplementary_data)
+    const targetOrderId =
+      eventObj?.resource?.supplementary_data?.related_ids?.order_id ||
+      eventObj?.resource?.custom_id ||
+      eventObj?.resource?.id ||
+      'UNKNOWN';
+
+    const captureId =
+      eventType === 'PAYMENT.CAPTURE.COMPLETED'
+        ? eventObj?.resource?.id ||
+          eventObj?.resource?.supplementary_data?.related_ids?.capture_id ||
+          `CAP-${eventId}`
+        : undefined;
+
+    let targetTransition:
+      | {
+          targetStatus: PaymentOrderStatus;
+          captureId?: string;
+          capturedAt?: string;
+          metadata?: Record<string, unknown>;
+        }
+      | undefined;
+
+    if (eventType === 'PAYMENT.CAPTURE.COMPLETED') {
+      targetTransition = {
+        targetStatus: 'COMPLETED',
+        captureId,
+        capturedAt: new Date().toISOString(),
+        metadata: {
+          webhookEventId: eventId,
+          webhookCaptureId: captureId,
+        },
+      };
+    } else if (eventType === 'CHECKOUT.ORDER.APPROVED') {
+      targetTransition = {
+        targetStatus: 'APPROVED',
+        metadata: {
+          webhookEventId: eventId,
+        },
+      };
+    } else if (eventType === 'CHECKOUT.ORDER.VOIDED') {
+      targetTransition = {
+        targetStatus: 'VOIDED',
+        metadata: {
+          webhookEventId: eventId,
+        },
+      };
+    }
+
+    let expectedCurrency: string | undefined;
+    let expectedAmountMinor: number | undefined;
+
+    if (eventObj?.resource?.amount) {
+      expectedCurrency = eventObj.resource.amount.currency_code;
+      if (eventObj.resource.amount.value) {
+        expectedAmountMinor = Math.round(parseFloat(eventObj.resource.amount.value) * 100);
+      }
+    }
+
+    await this.repository.processWebhookEvent({
+      event: {
+        id: eventId,
+        eventType,
+        resourceId: targetOrderId,
+        processedAt: new Date().toISOString(),
+        payload: (payload as Record<string, unknown>) || {},
+      },
+      targetOrderId,
+      expectedCurrency,
+      expectedAmountMinor,
+      transition: targetTransition,
     });
 
-    // If duplicate event, return true (acknowledged) without reprocessing
-    if (!recorded) {
-      return true;
-    }
-
-    // Monotonic state update based on event type
-    try {
-      if (eventType === 'PAYMENT.CAPTURE.COMPLETED' && resourceId) {
-        await this.repository.updateOrderStatus(resourceId, 'COMPLETED');
-      } else if (eventType === 'CHECKOUT.ORDER.APPROVED' && resourceId) {
-        // Will not regress if order is already COMPLETED
-        await this.repository.updateOrderStatus(resourceId, 'APPROVED');
-      } else if (eventType === 'CHECKOUT.ORDER.VOIDED' && resourceId) {
-        await this.repository.updateOrderStatus(resourceId, 'VOIDED');
-      }
-    } catch {
-      // Ignored if regression was safely rejected by monotonic validator
-    }
-
     return true;
+  }
+
+  /**
+   * Reconcile local order state against authoritative PayPal Sandbox Orders v2 API.
+   * Guarantees Invariant G: zero capture requests are ever made during reconciliation.
+   */
+  async reconcileOrder(orderId: string, correlationId: string): Promise<ReconciliationResult> {
+    const stored = await this.repository.getOrderById(orderId);
+
+    if (!stored) {
+      // Missing local record: check if order exists in PayPal Sandbox
+      try {
+        const paypalOrder = await this.ordersClient.getOrder(orderId, correlationId);
+        return {
+          orderId,
+          status: 'REQUIRES_REVIEW',
+          providerStatus: paypalOrder.status,
+          details: `Order exists in PayPal Sandbox as ${paypalOrder.status} but has no corresponding AgentPay repository record. Server-side policy authorization is missing; cannot fabricate local order.`,
+          timestamp: new Date().toISOString(),
+        };
+      } catch (err: unknown) {
+        if (err instanceof PayPalOrderApiError && err.statusCode === 404) {
+          return {
+            orderId,
+            status: 'NOT_FOUND',
+            details: `Order ${orderId} does not exist in AgentPay repository or PayPal Sandbox.`,
+            timestamp: new Date().toISOString(),
+          };
+        }
+        return {
+          orderId,
+          status: 'RETRYABLE_ERROR',
+          details: `Order not found locally and PayPal lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+    }
+
+    // Local order exists: query authoritative PayPal Sandbox state
+    let liveOrder: {
+      id: string;
+      status: string;
+      purchase_units?: Array<{
+        amount?: { currency_code: string; value: string };
+        payments?: {
+          captures?: Array<{ id: string; create_time?: string }>;
+        };
+      }>;
+    };
+
+    try {
+      liveOrder = await this.ordersClient.getOrder(orderId, correlationId);
+    } catch (err: unknown) {
+      if (err instanceof PayPalOrderApiError && err.statusCode === 404) {
+        return {
+          orderId,
+          status: 'CONFLICT',
+          previousOrderStatus: stored.status,
+          currentOrderStatus: stored.status,
+          details: `Order ${orderId} exists in AgentPay repository as ${stored.status} but PayPal returned 404 NOT_FOUND.`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      return {
+        orderId,
+        status: 'RETRYABLE_ERROR',
+        previousOrderStatus: stored.status,
+        currentOrderStatus: stored.status,
+        details: `Failed to retrieve authoritative PayPal state: ${err instanceof Error ? err.message : String(err)}. Financial state preserved.`,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // Verify monetary and currency consistency
+    const providerCurrency = liveOrder.purchase_units?.[0]?.amount?.currency_code;
+    const providerValue = parseFloat(liveOrder.purchase_units?.[0]?.amount?.value || '0');
+    const providerMinor = Math.round(providerValue * 100);
+
+    if (
+      providerCurrency &&
+      (providerCurrency !== stored.currency || providerMinor !== stored.amountMinor)
+    ) {
+      return {
+        orderId,
+        status: 'CONFLICT',
+        previousOrderStatus: stored.status,
+        currentOrderStatus: stored.status,
+        providerStatus: liveOrder.status,
+        details: `Financial discrepancy detected: local=${stored.currency} ${stored.amountMinor} vs provider=${providerCurrency} ${providerMinor}. Reconciliation blocked.`,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // Monotonic state progression
+    const previousStatus = stored.status;
+    let targetStatus: PaymentOrderStatus | null = null;
+    let captureId: string | undefined = undefined;
+    let capturedAt: string | undefined = undefined;
+
+    if (liveOrder.status === 'COMPLETED') {
+      const foundCaptureId =
+        liveOrder.purchase_units?.[0]?.payments?.captures?.[0]?.id ?? stored.captureId;
+      if (!foundCaptureId) {
+        return {
+          orderId,
+          status: 'REQUIRES_REVIEW',
+          previousOrderStatus: stored.status,
+          currentOrderStatus: stored.status,
+          providerStatus: liveOrder.status,
+          details: `PayPal reported COMPLETED but no authoritative capture evidence/ID was present in provider response. Order cannot transition to COMPLETED without capture evidence.`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      targetStatus = 'COMPLETED';
+      captureId = foundCaptureId;
+      capturedAt =
+        liveOrder.purchase_units?.[0]?.payments?.captures?.[0]?.create_time ??
+        new Date().toISOString();
+    } else if (
+      liveOrder.status === 'APPROVED' &&
+      stored.status !== 'APPROVED' &&
+      stored.status !== 'COMPLETED'
+    ) {
+      targetStatus = 'APPROVED';
+    } else if (
+      liveOrder.status === 'VOIDED' &&
+      stored.status !== 'VOIDED' &&
+      stored.status !== 'COMPLETED'
+    ) {
+      targetStatus = 'VOIDED';
+    }
+
+    if (
+      targetStatus &&
+      targetStatus !== previousStatus &&
+      canTransitionStatus(previousStatus, targetStatus, { captureId })
+    ) {
+      const updated = await this.repository.updateOrderStatus(orderId, targetStatus, {
+        captureId,
+        capturedAt,
+        lastReconciledAt: new Date().toISOString(),
+        reconciliationStatus: 'UPDATED',
+        metadata: {
+          lastReconciledProviderStatus: liveOrder.status,
+        },
+      });
+
+      return {
+        orderId,
+        status: 'UPDATED',
+        previousOrderStatus: previousStatus,
+        currentOrderStatus: updated.status,
+        providerStatus: liveOrder.status,
+        details: `State reconciled from ${previousStatus} to ${updated.status} based on authoritative PayPal response.`,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // Update reconciliation timestamp when state is unchanged
+    await this.repository.updateOrderStatus(orderId, previousStatus, {
+      lastReconciledAt: new Date().toISOString(),
+      reconciliationStatus: 'UNCHANGED',
+    });
+
+    return {
+      orderId,
+      status: 'UNCHANGED',
+      previousOrderStatus: previousStatus,
+      currentOrderStatus: previousStatus,
+      providerStatus: liveOrder.status,
+      details: 'Local state is already in sync with authoritative PayPal state.',
+      timestamp: new Date().toISOString(),
+    };
   }
 
   private toPaymentOrder(stored: StoredPaymentOrder): PaymentOrder {
@@ -387,6 +626,8 @@ export class PayPalPaymentProvider implements PaymentProvider {
       createdAt: stored.createdAt,
       environmentNote: 'Official PayPal Sandbox Order',
       idempotencyKey: stored.idempotencyKey,
+      lastReconciledAt: stored.lastReconciledAt,
+      reconciliationStatus: stored.reconciliationStatus,
     };
   }
 }
