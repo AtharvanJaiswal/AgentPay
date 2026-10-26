@@ -95,11 +95,11 @@ export function buildApp(repository?: AuditRepository) {
   });
 
   app.get('/events', async (req, reply) => {
-    const query = req.query as { limit?: string; correlationId?: string };
+    const query = req.query as { limit?: string; correlationId?: string; resourceId?: string };
     const limit = query.limit ? parseInt(query.limit, 10) : 50;
 
     try {
-      const events = await repo.listEvents(limit, query.correlationId);
+      const events = await repo.listEvents(limit, query.correlationId, query.resourceId);
       return reply.status(200).send(events);
     } catch {
       return reply.status(500).send({

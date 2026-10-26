@@ -41,10 +41,17 @@ export class InMemoryAuditRepository implements AuditRepository {
     return event;
   }
 
-  async listEvents(limit = 50, correlationId?: string): Promise<AuditEvent[]> {
+  async listEvents(
+    limit = 50,
+    correlationId?: string,
+    resourceId?: string,
+  ): Promise<AuditEvent[]> {
     let filtered = this.events;
     if (correlationId) {
       filtered = filtered.filter((e) => e.correlationId === correlationId);
+    }
+    if (resourceId) {
+      filtered = filtered.filter((e) => e.resourceId === resourceId);
     }
     return filtered.slice(0, limit);
   }
@@ -125,20 +132,34 @@ export class PostgresAuditRepository implements AuditRepository {
     };
   }
 
-  async listEvents(limit = 50, correlationId?: string): Promise<AuditEvent[]> {
+  async listEvents(
+    limit = 50,
+    correlationId?: string,
+    resourceId?: string,
+  ): Promise<AuditEvent[]> {
     let query = `
       SELECT id, correlation_id, event_type, actor, resource_id, timestamp, metadata, outcome, reason_code
       FROM audit_events
     `;
+    const conditions: string[] = [];
     const values: (string | number)[] = [];
+    let idx = 1;
 
     if (correlationId) {
-      query += ` WHERE correlation_id = $1 ORDER BY timestamp DESC LIMIT $2`;
-      values.push(correlationId, limit);
-    } else {
-      query += ` ORDER BY timestamp DESC LIMIT $1`;
-      values.push(limit);
+      conditions.push(`correlation_id = $${idx++}`);
+      values.push(correlationId);
     }
+
+    if (resourceId) {
+      conditions.push(`resource_id = $${idx++}`);
+      values.push(resourceId);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    query += ` ORDER BY timestamp DESC LIMIT $${idx++}`;
+    values.push(limit);
 
     const result = await this.pool.query(query, values);
     return result.rows.map((row) => ({

@@ -205,6 +205,24 @@ export function buildApp(
     }
   });
 
+  // List durable proposals (filtered by principalId or status)
+  app.get('/proposals', async (req, reply) => {
+    const query = req.query as {
+      principalId?: string;
+      status?: ProposalLifecycleStatus;
+      limit?: string;
+    };
+    const limit = query.limit ? parseInt(query.limit, 10) : 50;
+
+    const proposals = await repository.listProposals({
+      principalId: query.principalId,
+      status: query.status,
+      limit,
+    });
+
+    return reply.status(200).send(proposals);
+  });
+
   // Retrieve durable proposal by ID
   app.get('/proposals/:id', async (req, reply) => {
     const correlationId = req.headers['x-correlation-id'] as string;

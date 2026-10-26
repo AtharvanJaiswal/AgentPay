@@ -7,6 +7,8 @@ import {
   CreatePurchaseIntentInputSchema,
   PurchaseProposalSchema,
   ProductSearchQuerySchema,
+  ApproveProposalInputSchema,
+  RejectProposalInputSchema,
   candidateToCatalogItem,
   computeIntentFingerprint,
   safeIntegerMultiply,
@@ -19,6 +21,8 @@ import {
   type PolicyDecision,
   type ProductCandidate,
   type CatalogItem,
+  type ProposalLifecycleStatus,
+  type AuditEvent,
 } from '@agentpay/contracts';
 import { createLogger, getChildLogger } from '@agentpay/logger';
 import { getApiGatewayConfig, type ApiGatewayConfig } from '@agentpay/config';
@@ -834,6 +838,42 @@ export function buildApp(
     });
   });
 
+  // List Proposals for Current Authenticated Principal
+  app.get('/api/purchase-intents', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      reqLogger.warn('Unauthenticated request to list proposals rejected');
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to list purchase proposals.',
+          correlationId,
+        },
+      });
+    }
+
+    const query = req.query as {
+      status?: ProposalLifecycleStatus;
+      limit?: string;
+    };
+    const limit = query.limit ? parseInt(query.limit, 10) : 50;
+
+    const proposals = await client.listProposals(
+      {
+        principalId: principal.id,
+        status: query.status,
+        limit,
+      },
+      correlationId,
+    );
+
+    return reply.status(200).send(proposals);
+  });
+
   // Get Proposal by ID (with principal authorization check)
   app.get('/api/purchase-intents/:id', async (req, reply) => {
     const correlationId = req.headers['x-correlation-id'] as string;
@@ -876,6 +916,314 @@ export function buildApp(
     }
 
     return reply.status(200).send(proposal);
+  });
+
+  // Explicit Human Authorization of Purchase Proposal
+  // CRITICAL PAYMENT SAFETY: Authorization decision only. ZERO payment execution calls.
+  app.post('/api/purchase-intents/:id/approve', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+    const { id } = req.params as { id: string };
+
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      reqLogger.warn('Unauthenticated request to approve proposal rejected');
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to authorize purchase proposals.',
+          correlationId,
+        },
+      });
+    }
+
+    const principalId = principal.id;
+
+    const proposal = await client.getProposal(id, correlationId);
+    if (!proposal) {
+      return reply.status(404).send({
+        error: {
+          code: ErrorCodes.NOT_FOUND,
+          message: `Purchase proposal ${id} not found`,
+          correlationId,
+        },
+      });
+    }
+
+    // Ownership enforcement
+    if (proposal.principalId && proposal.principalId !== principalId) {
+      reqLogger.warn(
+        { principalId, proposalOwner: proposal.principalId, proposalId: id },
+        'Unauthorized proposal approval attempt blocked',
+      );
+      return reply.status(403).send({
+        error: {
+          code: ErrorCodes.FORBIDDEN,
+          message: 'Access to purchase proposal denied for principal',
+          correlationId,
+        },
+      });
+    }
+
+    // Idempotent return if already approved
+    if (proposal.status === 'APPROVED') {
+      return reply.status(200).send({
+        outcome: 'ALREADY_APPROVED',
+        proposal,
+        message: 'Purchase proposal has already been approved',
+        correlationId,
+      });
+    }
+
+    // Only reviewable states can be approved
+    if (proposal.status !== 'READY_FOR_REVIEW' && proposal.status !== 'POLICY_REVIEW_REQUIRED') {
+      return reply.status(400).send({
+        error: {
+          code: 'INVALID_STATE_TRANSITION',
+          message: `Cannot approve proposal in '${proposal.status}' state. Only proposals in 'READY_FOR_REVIEW' or 'POLICY_REVIEW_REQUIRED' can be approved.`,
+          correlationId,
+        },
+      });
+    }
+
+    const parseResult = ApproveProposalInputSchema.safeParse(req.body ?? {});
+    const note = parseResult.success ? parseResult.data.note : undefined;
+
+    try {
+      const updated = await client.updateProposalStatus(id, 'APPROVED', correlationId, {
+        expectedPrincipalId: principalId,
+        metadata: {
+          approvedByPrincipal: principalId,
+          approvedAt: new Date().toISOString(),
+          approvalNote: note ?? 'Explicitly approved by human reviewer',
+        },
+      });
+
+      // Transactional Audit Event
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PROPOSAL_APPROVED',
+          actor: principalId,
+          resourceId: id,
+          outcome: 'APPROVED',
+          metadata: {
+            proposalId: id,
+            totalAmountMinor: updated.totalAmountMinor,
+            currency: updated.currency,
+            merchantName: updated.merchantName,
+            policyDecisionId: updated.policyDecisionId,
+            note,
+          },
+        },
+        correlationId,
+      );
+
+      reqLogger.info(
+        { proposalId: id, principalId },
+        'Purchase proposal explicitly approved by human reviewer',
+      );
+
+      return reply.status(200).send({
+        outcome: 'APPROVED',
+        proposal: updated,
+        message: 'Purchase proposal authorized successfully by human reviewer',
+        correlationId,
+      });
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; statusCode?: number; message?: string };
+      reqLogger.error({ err }, 'Failed to approve purchase proposal');
+      return reply.status(errorObj.statusCode ?? 500).send({
+        error: {
+          code: errorObj.code ?? ErrorCodes.INTERNAL_ERROR,
+          message: errorObj.message ?? 'Failed to approve purchase proposal',
+          correlationId,
+        },
+      });
+    }
+  });
+
+  // Explicit Human Rejection of Purchase Proposal
+  app.post('/api/purchase-intents/:id/reject', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const reqLogger = getChildLogger(logger, correlationId);
+    const { id } = req.params as { id: string };
+
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      reqLogger.warn('Unauthenticated request to reject proposal rejected');
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to reject purchase proposals.',
+          correlationId,
+        },
+      });
+    }
+
+    const principalId = principal.id;
+
+    const proposal = await client.getProposal(id, correlationId);
+    if (!proposal) {
+      return reply.status(404).send({
+        error: {
+          code: ErrorCodes.NOT_FOUND,
+          message: `Purchase proposal ${id} not found`,
+          correlationId,
+        },
+      });
+    }
+
+    // Ownership enforcement
+    if (proposal.principalId && proposal.principalId !== principalId) {
+      reqLogger.warn(
+        { principalId, proposalOwner: proposal.principalId, proposalId: id },
+        'Unauthorized proposal rejection attempt blocked',
+      );
+      return reply.status(403).send({
+        error: {
+          code: ErrorCodes.FORBIDDEN,
+          message: 'Access to purchase proposal denied for principal',
+          correlationId,
+        },
+      });
+    }
+
+    // Idempotent return if already cancelled
+    if (proposal.status === 'CANCELLED') {
+      return reply.status(200).send({
+        outcome: 'ALREADY_CANCELLED',
+        proposal,
+        message: 'Purchase proposal has already been rejected',
+        correlationId,
+      });
+    }
+
+    // Disallow rejecting already approved or non-reviewable proposals
+    if (proposal.status !== 'READY_FOR_REVIEW' && proposal.status !== 'POLICY_REVIEW_REQUIRED') {
+      return reply.status(400).send({
+        error: {
+          code: 'INVALID_STATE_TRANSITION',
+          message: `Cannot reject proposal in '${proposal.status}' state. Only proposals in 'READY_FOR_REVIEW' or 'POLICY_REVIEW_REQUIRED' can be rejected.`,
+          correlationId,
+        },
+      });
+    }
+
+    const parseResult = RejectProposalInputSchema.safeParse(req.body ?? {});
+    const reason = parseResult.success ? parseResult.data.reason : undefined;
+
+    try {
+      const updated = await client.updateProposalStatus(id, 'CANCELLED', correlationId, {
+        expectedPrincipalId: principalId,
+        metadata: {
+          rejectedByPrincipal: principalId,
+          rejectedAt: new Date().toISOString(),
+          rejectionReason: reason ?? 'Explicitly rejected by human reviewer',
+        },
+      });
+
+      // Transactional Audit Event
+      await client.recordAuditEvent(
+        {
+          correlationId,
+          eventType: 'PROPOSAL_REJECTED',
+          actor: principalId,
+          resourceId: id,
+          outcome: 'REJECTED',
+          metadata: {
+            proposalId: id,
+            totalAmountMinor: updated.totalAmountMinor,
+            currency: updated.currency,
+            merchantName: updated.merchantName,
+            rejectionReason: reason,
+          },
+        },
+        correlationId,
+      );
+
+      reqLogger.info(
+        { proposalId: id, principalId },
+        'Purchase proposal rejected by human reviewer',
+      );
+
+      return reply.status(200).send({
+        outcome: 'REJECTED',
+        proposal: updated,
+        message: 'Purchase proposal rejected by human reviewer',
+        correlationId,
+      });
+    } catch (err: unknown) {
+      const errorObj = err as { code?: string; statusCode?: number; message?: string };
+      reqLogger.error({ err }, 'Failed to reject purchase proposal');
+      return reply.status(errorObj.statusCode ?? 500).send({
+        error: {
+          code: errorObj.code ?? ErrorCodes.INTERNAL_ERROR,
+          message: errorObj.message ?? 'Failed to reject purchase proposal',
+          correlationId,
+        },
+      });
+    }
+  });
+
+  // Proposal-scoped Audit History
+  app.get('/api/purchase-intents/:id/audit-events', async (req, reply) => {
+    const correlationId = req.headers['x-correlation-id'] as string;
+    const { id } = req.params as { id: string };
+
+    const principal = await authProvider.authenticate(req);
+    if (!principal) {
+      return reply.status(401).send({
+        error: {
+          code: ErrorCodes.UNAUTHORIZED,
+          message:
+            'Authentication required. Valid authenticated credentials must be provided to inspect audit events.',
+          correlationId,
+        },
+      });
+    }
+
+    const proposal = await client.getProposal(id, correlationId);
+    if (!proposal) {
+      return reply.status(404).send({
+        error: {
+          code: ErrorCodes.NOT_FOUND,
+          message: `Purchase proposal ${id} not found`,
+          correlationId,
+        },
+      });
+    }
+
+    if (proposal.principalId && proposal.principalId !== principal.id) {
+      return reply.status(403).send({
+        error: {
+          code: ErrorCodes.FORBIDDEN,
+          message: 'Access to purchase proposal audit history denied for principal',
+          correlationId,
+        },
+      });
+    }
+
+    // Query audit events for this specific proposal (by resourceId or correlationId)
+    const [eventsByResource, eventsByCorrelation] = await Promise.all([
+      client.listAuditEvents(50, undefined, id),
+      proposal.correlationId
+        ? client.listAuditEvents(50, proposal.correlationId)
+        : Promise.resolve([]),
+    ]);
+
+    // Deduplicate events by id and sort descending by timestamp
+    const eventMap = new Map<string, AuditEvent>();
+    for (const event of [...eventsByResource, ...eventsByCorrelation]) {
+      eventMap.set(event.id, event);
+    }
+    const combined = Array.from(eventMap.values()).sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+
+    return reply.status(200).send(combined);
   });
 
   // Create Proposal via Agent Service (Legacy / direct agent endpoint)

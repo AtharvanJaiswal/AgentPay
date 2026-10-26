@@ -110,6 +110,25 @@ export class InMemoryProposalRepository implements ProposalRepository {
     this.proposals.set(id, updated);
     return updated;
   }
+
+  async listProposals(options?: {
+    principalId?: string;
+    status?: ProposalLifecycleStatus;
+    limit?: number;
+  }): Promise<StoredPurchaseProposal[]> {
+    let result = Array.from(this.proposals.values());
+    if (options?.principalId) {
+      result = result.filter((p) => p.principalId === options.principalId);
+    }
+    if (options?.status) {
+      result = result.filter((p) => p.status === options.status);
+    }
+    result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (options?.limit && options.limit > 0) {
+      result = result.slice(0, options.limit);
+    }
+    return result;
+  }
 }
 
 /**
@@ -329,6 +348,39 @@ export class PostgresProposalRepository implements ProposalRepository {
     } finally {
       client.release();
     }
+  }
+
+  async listProposals(options?: {
+    principalId?: string;
+    status?: ProposalLifecycleStatus;
+    limit?: number;
+  }): Promise<StoredPurchaseProposal[]> {
+    const conditions: string[] = [];
+    const values: (string | number)[] = [];
+    let idx = 1;
+
+    if (options?.principalId) {
+      conditions.push(`principal_id = $${idx++}`);
+      values.push(options.principalId);
+    }
+
+    if (options?.status) {
+      conditions.push(`status = $${idx++}`);
+      values.push(options.status);
+    }
+
+    let query = 'SELECT * FROM purchase_proposals';
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    query += ' ORDER BY created_at DESC';
+
+    const limit = options?.limit ?? 50;
+    query += ` LIMIT $${idx++}`;
+    values.push(limit);
+
+    const res = await this.pool.query(query, values);
+    return res.rows.map((row) => this.mapRow(row));
   }
 
   private mapRow(row: Record<string, unknown>): StoredPurchaseProposal {

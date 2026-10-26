@@ -217,11 +217,18 @@ export class ServiceClient {
     }
   }
 
-  async listAuditEvents(limit = 50, correlationId?: string): Promise<AuditEvent[]> {
+  async listAuditEvents(
+    limit = 50,
+    correlationId?: string,
+    resourceId?: string,
+  ): Promise<AuditEvent[]> {
     try {
       let url = `${this.config.AUDIT_SERVICE_URL}/events?limit=${limit}`;
       if (correlationId) {
         url += `&correlationId=${encodeURIComponent(correlationId)}`;
+      }
+      if (resourceId) {
+        url += `&resourceId=${encodeURIComponent(resourceId)}`;
       }
       const res = await request(url, {
         method: 'GET',
@@ -354,6 +361,7 @@ export class ServiceClient {
     status: ProposalLifecycleStatus,
     correlationId: string,
     updates?: {
+      expectedPrincipalId?: string;
       policyDecisionId?: string;
       policyOutcome?: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
       policyReasonCode?: string;
@@ -367,6 +375,9 @@ export class ServiceClient {
         headers: {
           'content-type': 'application/json',
           'x-correlation-id': correlationId,
+          ...(updates?.expectedPrincipalId
+            ? { 'x-principal-id': updates.expectedPrincipalId }
+            : {}),
         },
         body: JSON.stringify({ status, ...updates }),
         headersTimeout: this.config.REQUEST_TIMEOUT_MS,
@@ -390,5 +401,40 @@ export class ServiceClient {
     }
 
     return body as StoredPurchaseProposal;
+  }
+
+  async listProposals(
+    options: {
+      principalId?: string;
+      status?: ProposalLifecycleStatus;
+      limit?: number;
+    },
+    correlationId: string,
+  ): Promise<StoredPurchaseProposal[]> {
+    let url = `${this.config.AGENT_SERVICE_URL}/proposals?`;
+    const params = new URLSearchParams();
+    if (options.principalId) {
+      params.set('principalId', options.principalId);
+    }
+    if (options.status) {
+      params.set('status', options.status);
+    }
+    if (options.limit) {
+      params.set('limit', String(options.limit));
+    }
+    url += params.toString();
+
+    const res = await request(url, {
+      method: 'GET',
+      headers: {
+        'x-correlation-id': correlationId,
+      },
+      headersTimeout: this.config.REQUEST_TIMEOUT_MS,
+    });
+
+    if (res.statusCode === 200) {
+      return (await res.body.json()) as StoredPurchaseProposal[];
+    }
+    return [];
   }
 }

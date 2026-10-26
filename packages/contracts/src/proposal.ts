@@ -175,6 +175,18 @@ export function computeIntentFingerprint(intent: {
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
+export const ApproveProposalInputSchema = z.object({
+  note: z.string().max(256).optional(),
+  idempotencyKey: z.string().max(128).optional(),
+});
+export type ApproveProposalInput = z.infer<typeof ApproveProposalInputSchema>;
+
+export const RejectProposalInputSchema = z.object({
+  reason: z.string().max(512).optional(),
+  idempotencyKey: z.string().max(128).optional(),
+});
+export type RejectProposalInput = z.infer<typeof RejectProposalInputSchema>;
+
 export interface ProposalRepository {
   createProposal(proposal: StoredPurchaseProposal): Promise<StoredPurchaseProposal>;
   getProposalById(id: string): Promise<StoredPurchaseProposal | null>;
@@ -190,4 +202,9 @@ export interface ProposalRepository {
       metadata?: Record<string, unknown>;
     },
   ): Promise<StoredPurchaseProposal>;
+  listProposals(options?: {
+    principalId?: string;
+    status?: ProposalLifecycleStatus;
+    limit?: number;
+  }): Promise<StoredPurchaseProposal[]>;
 }

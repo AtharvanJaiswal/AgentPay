@@ -136,6 +136,7 @@ services:
       PAYMENT_SERVICE_URL: http://payment-service:4003
       AUDIT_SERVICE_URL: http://audit-service:4004
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      ALLOW_DEV_IDENTITY: ${ALLOW_DEV_IDENTITY:-true}
     depends_on:
       agent-service:
         condition: service_healthy

@@ -25,6 +25,8 @@ export const AuditEventTypeSchema = z.enum([
   'ORDER_CAPTURE_ATTEMPTED',
   'ORDER_CAPTURED',
   'PAYMENT_BLOCKED',
+  'PROPOSAL_APPROVED',
+  'PROPOSAL_REJECTED',
   'SYSTEM_SECURITY_ALERT',
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
@@ -53,5 +55,5 @@ export type CreateAuditEventInput = z.infer<typeof CreateAuditEventInputSchema>;
 
 export interface AuditRepository {
   recordEvent(event: CreateAuditEventInput): Promise<AuditEvent>;
-  listEvents(limit?: number, correlationId?: string): Promise<AuditEvent[]>;
+  listEvents(limit?: number, correlationId?: string, resourceId?: string): Promise<AuditEvent[]>;
 }
