@@ -1,0 +1,39 @@
+# Multi-stage Dockerfile for Render Unified Deployment
+FROM node:24-alpine AS base
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+WORKDIR /app
+
+FROM base AS builder
+WORKDIR /app
+
+# Copy root configuration and workspace manifests
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
+COPY packages/ ./packages/
+COPY services/ ./services/
+COPY apps/ ./apps/
+COPY db/ ./db/
+COPY scripts/ ./scripts/
+
+# Install dependencies deterministically
+RUN pnpm install --frozen-lockfile
+
+# Build all packages, services, and Next.js web application
+RUN pnpm --recursive run build
+
+FROM node:24-alpine AS runner
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+
+ENV NODE_ENV=development
+ENV APP_ENV=development
+ENV HOST=0.0.0.0
+ENV PORT=10000
+
+# Copy built application and workspace dependencies
+COPY --from=builder /app ./
+
+# Render web service default exposed port
+EXPOSE 10000
+
+# Launch all microservices and Next.js web dashboard
+CMD ["node", "scripts/start-render.mjs"]
