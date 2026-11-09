@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState } from 'react';
 import type { ProductCandidate, ProductSearchResultStatus } from '@agentpay/contracts';
 import { CandidateCard } from './CandidateCard';

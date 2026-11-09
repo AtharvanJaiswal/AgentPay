@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState } from 'react';
 import type { StoredPurchaseProposal, ProposalLifecycleStatus } from '@agentpay/contracts';
 import { Badge } from '../ui/Badge';

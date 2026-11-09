@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useEffect, useState, useCallback } from 'react';
 import type { AuditEvent } from '@agentpay/contracts';
 import { defaultApiClient } from '../../lib/api/client';
